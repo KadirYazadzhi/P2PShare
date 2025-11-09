@@ -1,0 +1,42 @@
+# Build artifacts
+/build/
+/cmake-build-debug/
+/cmake-build-release/
+
+# Object files and binaries
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.a
+*.lib
+
+# Generated files
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Temporary / OS files
+*.DS_Store
+*.Thumbs.db
+*.tmp
+
+# SQLite database files (if local only)
+*.db
+
+# Optional: manifest/pieces cache (if you store chunks locally)
+data/downloads/
+data/shared/*/pieces/
