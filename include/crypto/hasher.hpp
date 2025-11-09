@@ -1,0 +1,26 @@
+#ifndef P2P_HASHER_HPP
+#define P2P_HASHER_HPP
+
+#include <vector>
+#include <string>
+#include "../files/manifest.hpp" // For hash_t
+
+namespace Hasher {
+
+/**
+ * @brief Calculates the SHA-256 hash of a data buffer.
+ * @param data The data to hash.
+ * @return A 32-byte SHA-256 hash.
+ */
+hash_t sha256(const std::vector<uint8_t>& data);
+
+/**
+ * @brief Calculates the SHA-256 hash of a string.
+ * @param data The string to hash.
+ * @return A 32-byte SHA-256 hash.
+ */
+hash_t sha256(const std::string& data);
+
+} // namespace Hasher
+
+#endif //P2P_HASHER_HPP
