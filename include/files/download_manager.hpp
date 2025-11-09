@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <optional>
 #include <set>
+#include <map> // For piece_availability
 
 namespace fs = std::filesystem;
 
@@ -24,7 +25,7 @@ public:
     // Starts the download process (can be called after adding the first peer)
     void start();
 
-    size_t get_peer_count() const { return peers_.size(); } // <--- Added this
+    size_t get_peer_count() const { return peers_.size(); }
 
 private:
     void handle_search_response(const Message& msg, std::shared_ptr<Connection> peer_conn);
@@ -61,7 +62,12 @@ private:
 
     // Download progress
     std::vector<PieceState> piece_states_;
-    
+    std::vector<uint32_t> piece_availability_; // How many peers have each piece
+
+    // Pipelining
+    static constexpr size_t REQUEST_WINDOW_SIZE = 5; // Max concurrent requests per peer
+    std::map<std::shared_ptr<Connection>, std::set<uint32_t>> in_flight_requests_; // Pieces requested from a peer
+
     fs::path temp_file_path_;
     fs::path final_file_path_;
 };
