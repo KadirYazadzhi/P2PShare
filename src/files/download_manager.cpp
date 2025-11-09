@@ -5,6 +5,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <map>
 
 // Helper for serializing/deserializing manifest (should be in a common place)
 namespace Serializer {
@@ -49,13 +50,12 @@ void DownloadManager::start() {
         std::cerr << "Cannot start download, no peers available." << std::endl;
         return;
     }
-    if (state_ != ManagerState::IDLE && state_ != ManagerState::REQUESTING_MANIFEST) return; // Already started or requesting
+    if (state_ != ManagerState::IDLE && state_ != ManagerState::REQUESTING_MANIFEST) return;
 
-    if (!manifest_) { // Only request manifest if we don't have it yet
+    if (!manifest_) {
         std::cout << "Starting download by requesting manifest..." << std::endl;
         state_ = ManagerState::REQUESTING_MANIFEST;
         
-        // Request manifest from the first peer
         auto first_peer = *peers_.begin();
         QuerySearchPayload payload;
         payload.root_hash = root_hash_;
@@ -67,7 +67,6 @@ void DownloadManager::start() {
 
         first_peer->send_message(msg);
     } else {
-        // If manifest is already available, just schedule work (e.g., if a new peer was added)
         state_ = ManagerState::DOWNLOADING;
         schedule_work();
     }
@@ -92,17 +91,9 @@ void DownloadManager::handle_message(const Message& msg, std::shared_ptr<Connect
 void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr<Connection> peer_conn) {
     // If we already have the manifest, this is a response to a bitfield request for a new peer
     if (manifest_ && state_ == ManagerState::DOWNLOADING) {
-        // Just process the bitfield part if it's a SEARCH_RESPONSE for a new peer
-        // This is a bit of a hack, ideally the protocol would have a separate message for requesting bitfield
-        if (msg.payload[0]) { // If found
-            std::vector<uint8_t> manifest_data(msg.payload.begin() + 1, msg.payload.end());
-            Manifest received_manifest = Serializer::deserialize_manifest(manifest_data);
-            // We don't need to store the manifest again, but we can use its piece_count
-            // to initialize the bitfield for this peer.
-            
-            // Now, request the bitfield from this peer (which should be sent automatically by server)
-            // Or, if the server sends bitfield immediately after search response, it will be handled by handle_bitfield_response
-        }
+        // The server sends BITFIELD right after SEARCH_RESPONSE, so this SEARCH_RESPONSE
+        // for an already known manifest is effectively just a confirmation.
+        // The BITFIELD will be handled by handle_bitfield_response.
         return;
     }
 
@@ -111,7 +102,7 @@ void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr
     bool found = msg.payload[0];
     if (!found) {
         std::cerr << "File not found on peer " << peer_conn->socket().remote_endpoint() << std::endl;
-        state_ = ManagerState::FAILED; // Or try next peer
+        state_ = ManagerState::FAILED;
         return;
     }
 
@@ -125,8 +116,8 @@ void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr
     fs::resize_file(temp_file_path_, manifest_->file_size);
 
     piece_states_.assign(manifest_->pieces_count, PieceState::Needed);
+    piece_availability_.assign(manifest_->pieces_count, 0); // Initialize piece rarity counts
     state_ = ManagerState::DOWNLOADING;
-    // Wait for BITFIELD message which should follow this one.
 }
 
 void DownloadManager::handle_bitfield_response(const Message& msg, std::shared_ptr<Connection> peer_conn) {
@@ -142,34 +133,72 @@ void DownloadManager::handle_bitfield_response(const Message& msg, std::shared_p
 
     std::cout << "Received bitfield from peer " << peer_conn->socket().remote_endpoint() << std::endl;
 
+    // Update global piece availability
+    for (uint32_t i = 0; i < manifest_->pieces_count; ++i) {
+        if (bf.has_piece(i)) {
+            piece_availability_[i]++;
+        }
+    }
+
     schedule_work();
 }
 
 void DownloadManager::schedule_work() {
     if (state_ != ManagerState::DOWNLOADING) return;
 
-    // Simple sequential scheduler
+    // Check if download is complete
+    bool all_done = true;
+    for(PieceState ps : piece_states_) {
+        if (ps != PieceState::Have) {
+            all_done = false;
+            break;
+        }
+    }
+    if (all_done) {
+        finalize_download();
+        return;
+    }
+
+    // Collect needed pieces and sort by rarity
+    std::vector<std::pair<uint32_t, uint32_t>> rarest_pieces; // {piece_index, rarity_count}
     for (uint32_t i = 0; i < manifest_->pieces_count; ++i) {
         if (piece_states_[i] == PieceState::Needed) {
-            for (const auto& peer : peers_) {
-                auto bitfield = peer->get_peer_bitfield(root_hash_);
-                if (bitfield && bitfield->has_piece(i)) {
-                    request_piece_from_peer(i, peer);
-                    return; 
-                }
-            }
+            rarest_pieces.push_back({i, piece_availability_[i]});
         }
     }
 
-    auto it = std::find(piece_states_.begin(), piece_states_.end(), PieceState::Needed);
-    auto it2 = std::find(piece_states_.begin(), piece_states_.end(), PieceState::Requested);
-    if (it == piece_states_.end() && it2 == piece_states_.end()) {
-        finalize_download();
+    // Sort by rarity (ascending)
+    std::sort(rarest_pieces.begin(), rarest_pieces.end(), 
+              [](const auto& a, const auto& b) { return a.second < b.second; });
+
+    // Try to fill request windows for all peers
+    for (const auto& peer : peers_) {
+        // Check if peer is still connected and has a bitfield
+        auto peer_bitfield_opt = peer->get_peer_bitfield(root_hash_);
+        if (!peer_bitfield_opt) continue; // Peer not ready or no bitfield yet
+
+        Bitfield peer_bitfield = *peer_bitfield_opt;
+
+        // Fill peer's request window
+        while (in_flight_requests_[peer].size() < REQUEST_WINDOW_SIZE) {
+            bool requested_a_piece = false;
+            for (const auto& piece_info : rarest_pieces) {
+                uint32_t piece_index = piece_info.first;
+
+                if (piece_states_[piece_index] == PieceState::Needed && peer_bitfield.has_piece(piece_index)) {
+                    request_piece_from_peer(piece_index, peer);
+                    requested_a_piece = true;
+                    break; // Move to next peer or next slot in window
+                }
+            }
+            if (!requested_a_piece) break; // No more pieces to request from this peer
+        }
     }
 }
 
 void DownloadManager::request_piece_from_peer(uint32_t piece_index, std::shared_ptr<Connection> peer_conn) {
     piece_states_[piece_index] = PieceState::Requested;
+    in_flight_requests_[peer_conn].insert(piece_index);
 
     RequestPiecePayload payload;
     payload.root_hash = root_hash_;
@@ -190,7 +219,11 @@ void DownloadManager::handle_piece_response(const Message& msg, std::shared_ptr<
     uint32_t piece_index;
     std::memcpy(&piece_index, msg.payload.data() + HASH_SIZE, sizeof(uint32_t));
 
+    // Remove from in-flight requests
+    in_flight_requests_[peer_conn].erase(piece_index);
+
     if (piece_states_[piece_index] != PieceState::Requested) {
+        std::cout << "Received unexpected piece " << piece_index << " (not requested or already have)." << std::endl;
         return;
     }
 
@@ -203,7 +236,7 @@ void DownloadManager::handle_piece_response(const Message& msg, std::shared_ptr<
         schedule_work();
     } else {
         std::cerr << "Piece " << piece_index << " failed verification." << std::endl;
-        piece_states_[piece_index] = PieceState::Needed;
+        piece_states_[piece_index] = PieceState::Needed; // Mark as needed again
         schedule_work();
     }
 }
