@@ -118,18 +118,20 @@ int main(int argc, char* argv[]) {
         }
         auto dm = g_download_managers[root_hash];
 
-        int valid_peers_found = 0; // <-- FIX: Counter for valid peer arguments
+        std::vector<std::shared_ptr<Client>> clients; // <-- FIX: Keep client objects alive
+        int valid_peers_found = 0;
         std::regex peer_regex(R"(([^:]+):(\d+))");
         for (int i = 3; i < argc; ++i) {
             std::string peer_str = argv[i];
             std::smatch matches;
             if (std::regex_match(peer_str, matches, peer_regex) && matches.size() == 3) {
-                valid_peers_found++; // <-- FIX: Increment counter
+                valid_peers_found++;
                 std::string host = matches[1].str();
                 uint16_t port = std::stoi(matches[2].str());
 
-                // Client must be heap-allocated to exist for the duration of the async operation
                 auto c = std::make_shared<Client>(io_context, &client_message_handler);
+                clients.push_back(c); // <-- FIX: Store the shared_ptr
+
                 c->connect(host, port, [dm](std::shared_ptr<Connection> conn){
                     dm->add_peer(conn);
                     dm->start(); 
@@ -139,7 +141,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (valid_peers_found == 0) { // <-- FIX: Check the counter
+        if (valid_peers_found == 0) {
             std::cerr << "No valid peers provided for download." << std::endl;
             return 1;
         }
