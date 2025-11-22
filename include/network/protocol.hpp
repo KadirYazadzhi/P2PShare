@@ -5,6 +5,7 @@
 #include <array>
 #include <vector>
 #include "files/manifest.hpp" // Include the full manifest definition
+#include "dht/kademlia.hpp" // Include for dht::NodeID
 
 // Using a fixed-size array for the public key and peer_id for simplicity.
 constexpr size_t PUBKEY_SIZE = 32;
@@ -17,6 +18,7 @@ constexpr uint16_t PROTOCOL_VERSION = 1;
 constexpr size_t HEADER_SIZE = sizeof(uint32_t) + sizeof(uint8_t);
 
 enum class MessageType : uint8_t {
+    // TCP messages
     HANDSHAKE = 0,
     KEEPALIVE = 1,
     QUERY_SEARCH = 2,
@@ -25,6 +27,16 @@ enum class MessageType : uint8_t {
     PIECE = 5,
     BITFIELD = 6,
     HAVE = 7,
+
+    // DHT (UDP) messages
+    DHT_PING = 10,
+    DHT_PONG = 11,
+    DHT_FIND_NODE = 12,
+    DHT_FIND_NODE_RESPONSE = 13,
+    DHT_STORE = 14,
+    DHT_FIND_VALUE = 15,
+    DHT_FIND_VALUE_RESPONSE = 16,
+
     // ... other message types
     ERROR_UNSPECIFIED = 255
 };
@@ -51,6 +63,45 @@ struct HavePayload {
     hash_t root_hash;
     uint32_t piece_index;
 };
+
+// DHT Payloads
+struct DhtPingPayload {
+    dht::NodeID sender_id;
+    uint16_t sender_port; // Port on which sender is listening for UDP
+};
+
+struct DhtPongPayload {
+    dht::NodeID sender_id;
+};
+
+struct DhtFindNodePayload {
+    dht::NodeID target_id;
+};
+
+// DhtFindNodeResponsePayload will be variable size, containing a count and then NodeInfo structs
+// For serialization, it will be: [count (uint32)][NodeInfo1][NodeInfo2]...
+// NodeInfo: [NodeID (32 bytes)][IP (4/16 bytes)][Port (2 bytes)]
+
+struct DhtStorePayload {
+    dht::NodeID key;
+    // Value is variable length, will be serialized as [len (uint32)][data...]
+};
+
+struct DhtFindValuePayload {
+    dht::NodeID key;
+};
+
+struct DhtFindNodeResponsePayload {
+    dht::NodeID target_id; // The ID that was searched for
+    // Followed by variable length list of NodeInfo
+};
+
+struct DhtFindValueResponsePayload {
+    dht::NodeID key; // The key that was searched for
+    // Followed by variable length: [found (uint8)][value_len (uint32)][value_data...] OR [found (uint8)][node_count (uint32)][NodeInfo1][NodeInfo2]...
+};
+
+#pragma pack(pop)
 #pragma pack(pop)
 
 // Note: SEARCH_RESPONSE, PIECE, and BITFIELD messages have variable-sized payloads.

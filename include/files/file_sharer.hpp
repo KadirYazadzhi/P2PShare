@@ -9,6 +9,8 @@
 #include <optional>
 #include <filesystem>
 
+#include "../storage/storage_manager.hpp" // Added for StorageManager
+
 // A custom hash function for std::array
 namespace std {
     template<size_t N>
@@ -30,8 +32,12 @@ public:
         return inst;
     }
 
-    // Add a file to be shared. Generates a manifest and stores it.
-    Manifest& share_file(const std::filesystem::path& file_path);
+    void set_storage_manager(StorageManager* sm) {
+        storage_manager_ = sm;
+    }
+
+    // Add a file to be shared. This method now takes the manifest directly.
+    void add_share(const Manifest& manifest, const std::filesystem::path& file_path);
 
     // Get the manifest for a shared file.
     std::optional<Manifest> get_manifest(const hash_t& root_hash) const;
@@ -48,6 +54,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<hash_t, Manifest> shared_manifests_;
     std::unordered_map<hash_t, std::filesystem::path> file_paths_;
+    StorageManager* storage_manager_ = nullptr; // Added StorageManager member
 };
 
 #endif //P2P_FILE_SHARER_HPP

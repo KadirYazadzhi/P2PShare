@@ -35,3 +35,11 @@ hash_t sha256(const std::string& data) {
 }
 
 } // namespace Hasher
+
+hash_t hex_to_hash(const std::string& hex_str) {
+    hash_t hash;
+    for (size_t i = 0; i < HASH_SIZE; ++i) {
+        hash[i] = static_cast<uint8_t>(std::stoul(hex_str.substr(i * 2, 2), nullptr, 16));
+    }
+    return hash;
+}

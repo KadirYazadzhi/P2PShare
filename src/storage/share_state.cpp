@@ -7,7 +7,7 @@
 namespace fs = std::filesystem; // <--- Added this using directive
 using json = nlohmann::json;
 
-// Helper to convert binary hash to hex string and back
+// Helper to convert binary hash to hex string
 namespace {
     std::string hash_to_hex(const hash_t& hash) {
         std::stringstream ss;
@@ -16,14 +16,6 @@ namespace {
             ss << std::setw(2) << static_cast<int>(byte);
         }
         return ss.str();
-    }
-
-    hash_t hex_to_hash(const std::string& hex) {
-        hash_t hash;
-        for (size_t i = 0; i < HASH_SIZE; ++i) {
-            hash[i] = std::stoi(hex.substr(i * 2, 2), nullptr, 16);
-        }
-        return hash;
     }
 }
 
@@ -105,7 +97,8 @@ void ShareState::load_shares_into(FileSharer& sharer) {
             std::filesystem::path p = share_info.at("path").get<std::string>();
             
             if (fs::exists(p)) {
-                sharer.share_file(p);
+                Manifest m = share_info.at("manifest").get<Manifest>();
+                sharer.add_share(m, p);
                 std::cout << "Loaded shared file: " << p.filename() << std::endl;
             } else {
                 std::cerr << "Warning: Path for shared file not found, skipping: " << p << std::endl;

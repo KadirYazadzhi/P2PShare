@@ -23,4 +23,6 @@ hash_t sha256(const std::string& data);
 
 } // namespace Hasher
 
+hash_t hex_to_hash(const std::string& hex_str);
+
 #endif //P2P_HASHER_HPP

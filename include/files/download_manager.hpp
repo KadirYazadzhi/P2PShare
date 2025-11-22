@@ -3,6 +3,7 @@
 
 #include "manifest.hpp"
 #include "../network/connection.hpp"
+#include "../storage/storage_manager.hpp" // Added for StorageManager
 #include <memory>
 #include <vector>
 #include <filesystem>
@@ -14,7 +15,7 @@ namespace fs = std::filesystem;
 
 class DownloadManager {
 public:
-    explicit DownloadManager(hash_t root_hash);
+    explicit DownloadManager(hash_t root_hash, StorageManager& storage_manager); // Modified constructor
 
     // Add a new peer to this download swarm
     void add_peer(std::shared_ptr<Connection> peer_conn);
@@ -31,6 +32,7 @@ private:
     void handle_search_response(const Message& msg, std::shared_ptr<Connection> peer_conn);
     void handle_piece_response(const Message& msg, std::shared_ptr<Connection> peer_conn);
     void handle_bitfield_response(const Message& msg, std::shared_ptr<Connection> peer_conn);
+    void handle_have_response(const Message& msg, std::shared_ptr<Connection> peer_conn);
 
     // The main work scheduler
     void schedule_work();
@@ -38,6 +40,9 @@ private:
 
     bool verify_and_write_piece(uint32_t piece_index, const std::vector<uint8_t>& data);
     void finalize_download();
+
+    void load_download_state(); // New method to load state from storage
+    void save_download_state(); // New method to save state to storage
 
     enum class PieceState {
         Needed,
@@ -70,6 +75,7 @@ private:
 
     fs::path temp_file_path_;
     fs::path final_file_path_;
+    StorageManager& storage_manager_; // Added StorageManager reference
 };
 
 #endif //P2P_DOWNLOAD_MANAGER_HPP

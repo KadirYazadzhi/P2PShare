@@ -6,6 +6,8 @@
 #include <vector>
 #include <algorithm>
 #include <map>
+#include <sstream> // Added for stringstream
+#include <iomanip> // Added for iomanip
 
 // Helper for serializing/deserializing manifest (should be in a common place)
 namespace Serializer {
@@ -13,22 +15,63 @@ namespace Serializer {
     Manifest deserialize_manifest(const std::vector<uint8_t>& buffer);
 }
 
-DownloadManager::DownloadManager(hash_t root_hash)
-    : state_(ManagerState::IDLE), root_hash_(root_hash) {
-    
-    std::string hex_hash;
-    for(uint8_t byte : root_hash) {
-        char buf[3];
-        snprintf(buf, sizeof(buf), "%02x", byte);
-        hex_hash += buf;
+// Helper function to convert hash_t to hex string (copied from storage_manager.cpp)
+std::string hash_to_hex_dm(const hash_t& hash) {
+    std::stringstream ss;
+    for (uint8_t byte : hash) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
     }
-    temp_file_path_ = fs::temp_directory_path() / (hex_hash + ".tmp");
-    std::cout << "DownloadManager created for hash: " << hex_hash << std::endl;
+    return ss.str();
+}
+
+DownloadManager::DownloadManager(hash_t root_hash, StorageManager& storage_manager)
+    : state_(ManagerState::IDLE), root_hash_(root_hash), storage_manager_(storage_manager) { // Initialize storage_manager_ and root_hash_
+    
+    std::string hex_hash_str = hash_to_hex_dm(root_hash_);
+    temp_file_path_ = fs::temp_directory_path() / (hex_hash_str + ".tmp");
+    final_file_path_ = fs::current_path() / hex_hash_str; // Default final path
+
+    std::cout << "DownloadManager created for hash: " << hex_hash_str << std::endl;
+    load_download_state(); // Load existing state from storage
+}
+
+void DownloadManager::load_download_state() {
+    auto dm_state = storage_manager_.get_download_state(root_hash_);
+    if (!std::get<0>(dm_state).empty()) {
+        final_file_path_ = std::get<0>(dm_state);
+        // progress = std::get<1>(dm_state); // Currently, progress is just a piece_states_ count.
+                                            // Need to enhance storage to save piece_states_ as BLOB.
+                                            // For now, it will restart from scratch, but manifest is loaded.
+        std::cout << "Loaded download state for " << hash_to_hex_dm(root_hash_) << " from storage." << std::endl;
+        // Also load manifest if available
+        manifest_ = storage_manager_.get_manifest(root_hash_);
+        if (manifest_) {
+            piece_states_.assign(manifest_->pieces_count, PieceState::Needed); // Reset pieces states for now
+            piece_availability_.assign(manifest_->pieces_count, 0);
+            std::cout << "Manifest loaded from storage." << std::endl;
+            state_ = ManagerState::DOWNLOADING; // Ready to continue download
+        }
+    }
+}
+
+void DownloadManager::save_download_state() {
+    if (manifest_) {
+        // Here, 'progress' is simplified to piece_states_ size,
+        // but should ideally be the number of 'Have' pieces.
+        uint32_t progress = 0;
+        for(PieceState ps : piece_states_) {
+            if (ps == PieceState::Have) {
+                progress++;
+            }
+        }
+        storage_manager_.save_download_state(root_hash_, final_file_path_.string(), progress);
+    }
 }
 
 void DownloadManager::add_peer(std::shared_ptr<Connection> peer_conn) {
     peers_.insert(peer_conn);
     std::cout << "Peer " << peer_conn->socket().remote_endpoint() << " added to download." << std::endl;
+
     
     // If we already have the manifest, request bitfield from new peer
     if (manifest_ && state_ == ManagerState::DOWNLOADING) {
@@ -82,6 +125,9 @@ void DownloadManager::handle_message(const Message& msg, std::shared_ptr<Connect
             break;
         case MessageType::BITFIELD:
             handle_bitfield_response(msg, peer_conn);
+            break;
+        case MessageType::HAVE:
+            handle_have_response(msg, peer_conn);
             break;
         default:
             break;
@@ -140,6 +186,37 @@ void DownloadManager::handle_bitfield_response(const Message& msg, std::shared_p
         }
     }
 
+    schedule_work();
+}
+
+void DownloadManager::handle_have_response(const Message& msg, std::shared_ptr<Connection> peer_conn) {
+    if (!manifest_) return;
+
+    HavePayload payload;
+    if (msg.payload.size() != sizeof(HavePayload)) return;
+    std::memcpy(&payload, msg.payload.data(), sizeof(HavePayload));
+
+    if (payload.root_hash != root_hash_) return;
+
+    // Update the peer's bitfield
+    auto peer_bitfield_opt = peer_conn->get_peer_bitfield(root_hash_);
+    if (peer_bitfield_opt) {
+        Bitfield peer_bitfield = *peer_bitfield_opt;
+        if (!peer_bitfield.has_piece(payload.piece_index)) {
+            peer_bitfield.set_piece(payload.piece_index);
+            peer_conn->set_peer_bitfield(root_hash_, peer_bitfield);
+
+            // Update global piece availability
+            if (payload.piece_index < piece_availability_.size()) {
+                piece_availability_[payload.piece_index]++;
+                std::cout << "Peer " << peer_conn->socket().remote_endpoint() 
+                          << " now has piece " << payload.piece_index << ". Rarity is now " 
+                          << piece_availability_[payload.piece_index] << std::endl;
+            }
+        }
+    }
+
+    // We might be able to request this piece now
     schedule_work();
 }
 
@@ -232,7 +309,15 @@ void DownloadManager::handle_piece_response(const Message& msg, std::shared_ptr<
     if (verify_and_write_piece(piece_index, piece_data)) {
         piece_states_[piece_index] = PieceState::Have;
         std::cout << "Piece " << piece_index << " downloaded and verified." << std::endl;
+        save_download_state(); // Save state after successful piece download
         
+        // Notify all peers that we now have this piece
+        for (const auto& peer : peers_) {
+            if (peer != peer_conn) { // Don't notify the peer we got it from
+                peer->send_have(root_hash_, piece_index);
+            }
+        }
+
         schedule_work();
     } else {
         std::cerr << "Piece " << piece_index << " failed verification." << std::endl;
@@ -258,6 +343,7 @@ bool DownloadManager::verify_and_write_piece(uint32_t piece_index, const std::ve
 void DownloadManager::finalize_download() {
     if (state_ == ManagerState::COMPLETED) return;
     state_ = ManagerState::COMPLETED;
+    save_download_state(); // Save state after download completion
     std::cout << "Download complete! Assembling file." << std::endl;
     
     std::error_code ec;

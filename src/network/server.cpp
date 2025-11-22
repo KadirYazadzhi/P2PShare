@@ -6,13 +6,29 @@
 
 Server::Server(asio::io_context& io_context, uint16_t port)
     : io_context_(io_context),
-      acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {
+      acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)),
+      ssl_context_(asio::ssl::context::tlsv12_server) { // Initialize SSL context
+    init_ssl_context(); // Initialize SSL context with certs
     std::cout << "Server listening on port " << port << std::endl;
     start_accept();
 }
 
+void Server::init_ssl_context() {
+    try {
+        ssl_context_.set_options(
+            asio::ssl::context::default_workarounds
+            | asio::ssl::context::no_sslv2
+            | asio::ssl::context::single_dh_use);
+        ssl_context_.use_certificate_chain_file("server.crt"); // Placeholder
+        ssl_context_.use_private_key_file("server.key", asio::ssl::context::pem); // Placeholder
+    } catch (const asio::system_error& e) {
+        std::cerr << "Error initializing SSL context: " << e.what() << std::endl;
+        // Handle error appropriately, e.g., exit or throw
+    }
+}
+
 void Server::start_accept() {
-    auto new_connection = std::make_shared<Connection>(io_context_);
+    auto new_connection = std::make_shared<Connection>(io_context_, ssl_context_); // Pass ssl_context_
 
     new_connection->set_message_handler([this, conn_weak = std::weak_ptr<Connection>(new_connection)](Message msg) {
         if (auto conn_shared = conn_weak.lock()) {
@@ -21,11 +37,11 @@ void Server::start_accept() {
     });
 
     acceptor_.async_accept(new_connection->socket(),
-        [this, new_connection](const asio::error_code& error) {
+        [this, new_connection](const asio::error_code& error) { // Renamed lambda parameter
             if (!error) {
                 std::cout << "New connection accepted from " << new_connection->socket().remote_endpoint() << std::endl;
                 connections_.insert(new_connection);
-                new_connection->start();
+                new_connection->start(asio::ssl::stream_base::server); // Start SSL handshake
             } else {
                 std::cerr << "Error accepting connection: " << error.message() << std::endl;
             }

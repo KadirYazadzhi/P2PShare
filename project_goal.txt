@@ -1,0 +1,389 @@
+Страхотно — давам ти **пълен, практически и детайлен план** за реализиране на peer-to-peer (P2P) файлообменна система на C++. Покривам: какво прави системата, архитектура, протокол, ключови алгоритми, структури от данни, библиотеки, дизайн на компонентите, съобщения/формати, механизъм за трансфер (chunking, верификация), NAT traversal, сигурност, persistent слоеве, тестове, и подробна поетапна планировка (milestones + acceptance criteria). Много е дълго — но е изпълнимо стъпка по стъпка.
+
+# 0 | Кратко описание (цел)
+
+P2P система за обмен на файлове без централен сървър (decentralized).
+Всеки участник (peer) може да:
+
+* споделя файлове (seed),
+* търси файлове в мрежата,
+* сваля файл паралелно от много peers (chunked download),
+* възобновява прекъснати трансфери,
+* верифицира целостта на данните (SHA-256 хешове),
+* оперира зад NAT чрез STUN/UTP hole-punching / (опционално) relay.
+
+Цел: надежден, безопасен, ефективен, разширяем протокол (като по-опростен BitTorrent / част от Kademlia DHT).
+
+# 1 | Основни характеристики (features)
+
+* Peer discovery: локално (LAN), DHT (Kademlia-подобна) и опционален bootstrap list.
+* Търсене: по хеш на съдържание (content-addressing).
+* Chunked download: файлът е разделен на парчета (например 256 KiB).
+* Piece verification: SHA-256 per piece + checksum/manifest (метаданни).
+* Rarest-first piece selection + pipelining.
+* Resume: частично изтеглени chunks запаметени на диск.
+* Concurrency: многопоточна архитектура (IO + worker threads).
+* Bandwidth control (upload/download throttling).
+* Encryption / transport security: TLS или Noise/Curve25519 for peer connections.
+* NAT traversal: UPnP / NAT-PMP, STUN + hole punching; fallback relay server.
+* Persistence: metadata DB (SQLite) за търсения, peers, активни трансфери.
+* CLI + опционален GUI (Qt) за визуализация.
+
+# 2 | Технологии и библиотеки (рекомендации)
+
+* C++20 (или C++17 ако предпочиташ съвместимост)
+* Networking: [ASIO (standalone Boost.Asio)](без need for boost) — асинхронни сокети
+* Crypto: libsodium или OpenSSL (libsodium предпочитам за съвременни primitives: Curve25519, XSalsa20/Poly1305, Argon2)
+* Hashing: OpenSSL/sha256 или libsodium crypto_generichash
+* DHT: собствена имплементация на Kademlia-like (не е външна lib)
+* Persistence: SQLite (sqlite3) или lmdb
+* Threading: std::thread + std::mutex + condition_variable; task queue (work stealing optional)
+* Build: CMake
+* Tests: Catch2 / GoogleTest
+* Optional GUI: Qt или Dear ImGui (за бързо прототипиране)
+
+# 3 | Високо ниво архитектура (компоненти)
+
+# Peer (single process)
+
+* Network Layer
+
+  * TCP/UDP socket manager (ASIO)
+  * Connection manager (handshake, keepalive)
+  * NAT traversal module (STUN client; UPnP helper)
+* Protocol layer
+
+  * Message parser/serializer (binary, framing)
+  * RPC-style и event messages
+* DHT module
+
+  * Routing table (k-buckets)
+  * FIND_NODE, FIND_VALUE, STORE ops
+* File Manager
+
+  * Shared files index (manifests)
+  * Chunking + read/write
+  * Piece verification
+* Transfer Manager
+
+  * Active downloads/uploads
+  * Piece selection algorithm
+  * Rate limiting
+* Storage (persistence)
+
+  * SQLite DB for peers, manifests, state
+* CLI / UI
+
+  * Commands: share, search, download, status, peers
+* Security module
+
+  * Identity (public/private keypair)
+  * Handshake & secure channels
+* Logging & Metrics
+
+# 4 | Протокол — съобщения и format
+
+Използвай бинарно форматиране (compact) с framing: [len (uint32)][msg_type (uint8)][payload...]
+
+Основни message types (пример):
+
+* `HANDSHAKE` — peer identity, protocol version, capabilities, port, NAT flags.
+
+  * payload: pubkey(32), protocol_version(2), listen_port(2), peer_id(20?), features bitmap
+* `KEEPALIVE` — ping/pong
+* `DHT_FIND_NODE` / `DHT_FIND_VALUE` / `DHT_STORE` — за routing
+* `QUERY_SEARCH` — търсене по content-hash / name (практично: hash)
+* `SEARCH_RESPONSE` — list of peers with file
+* `REQUEST_PIECE` — request piece index i (offset, length optional)
+* `PIECE` — payload: piece_index, piece_length, data
+* `CANCEL` — cancel pending request
+* `HAVE` — notification: which pieces peer has (bitfield / bloom)
+* `BITFIELD` — bitset за всички налични пиеси
+* `ERROR`
+
+Формат на manifest (метаданни на файл):
+
+* file_name (UTF-8)
+* file_size (uint64)
+* piece_size (uint32)
+* pieces_count (uint32)
+* pieces_hashes[] (SHA256 per piece) — ordered array
+* root_hash (SHA256 of concatenation или Merkle root) — content id (CID)
+* optional: metadata (mimetype, description)
+
+Content-addressing: идентификатор на файла е `root_hash` (SHA-256) или multihash.
+
+# 5 | Chunking и verification
+
+* Избираш piece_size = 256 KiB (може да бъде параметър).
+* Файлът се дели на N парчета; за всеки piece изчисляваш SHA-256.
+* Manifest съдържа масив от SHA-256; тези хешове са подписани/сертифицирани от оригиналния sharer (optional) или просто публикувани през DHT.
+* При download: получените pieces се хешират и сравняват.
+
+# 6 | DHT (Kademlia-like) — peer discovery & storing manifests
+
+Основни понятия:
+
+* Node ID: 160-bit или 256-bit (SHA256(pubkey)|truncated)
+* k-buckets per prefix distance
+* RPCs: PING, STORE (store manifest mapping root_hash -> list of peers or value), FIND_NODE, FIND_VALUE
+* Bootstrap: hard-coded bootstrap peers (IP:port) или mDNS/LAN discovery
+
+Flows:
+
+* Когато peer иска да сподели файл: изчислява manifest, изчислява file ID и прави STORE(manifest) в DHT (store at k closest nodes to file ID).
+* Когато peer търси файл: прави FIND_VALUE(fileID) → получава manifest (или list of peers) → започва торент-стил сваляне.
+
+# 7 | Piece selection algorithm (download strategy)
+
+* Maintain bitfield of peers (which pieces they have).
+* Rarest-first: за pieces, които са най-редки в swarm-а, предпочитай да ги сваляш първо.
+* Pipelining: изпращай паралелни REQUEST_PIECE към един peer (window of requests).
+* Optimistic unchoking: периодично опитвай нови peers за по-добри скорости.
+* End-game mode: когато остават много малки number of pieces, изпращаш заявки за същите piece-и към няколко peers и първият, който пристигне, се приема; останалите заявки се cancel.
+
+# 8 | Concurrency и I/O model
+
+* ASIO event loop (io_context) + multiple threads running io_context::run() за scalable async IO.
+* Thread pool за обработка на CPU-intensive tasks (hashing, disk IO if sync) — или използвай async file IO.
+* Работен flow:
+
+  * Network handlers възбуждат callback-и при входящи съобщения.
+  * Парсинг и основна логика в асинхронни callbacks.
+  * Hashing и запис на диск в worker threads.
+
+# 9 | NAT traversal
+
+* Опитай локално UPnP / NAT-PMP да отвориш порт.
+* STUN: получаваш публичния адрес/порт от STUN сървър. Използвай за hole-punching.
+* TCP hole-punching/UDP hole punching: опитай да инициираш връзка симултано.
+* Fallback: relay server (опционално) — ако пристигнеш зад симетричен NAT, използвай релей.
+
+# 10 | Сигурност и идентичност
+
+* Всяко peer притежава keypair (Curve25519/Ed25519).
+* Peer ID = hash(pubkey).
+* Handshake:
+
+  * Exchange pubkeys, perform authenticated key exchange (X25519 + optional signature).
+  * Derive session key (shared secret) -> use AEAD (ChaCha20-Poly1305) за encryption на payloads.
+* Manifest signing:
+
+  * Sharer може да подпише manifest с private key; това позволява други да проверят автентичност.
+* Optional: implement access control (password-protected shares) и ACLs.
+
+# 11 | Persistence (on-disk)
+
+* SQLite DB schema:
+
+  * peers(peer_id, ip, port, last_seen, nat_flags, score)
+  * manifests(file_id, file_name, file_size, piece_size, pieces_count, signer_pubkey, manifest_blob)
+  * downloads(download_id, file_id, status, progress, file_path, created_at)
+  * pieces(download_id, index, status, path)
+* File storage layout:
+
+  * /data/shared/<file_id>/manifest.json
+  * /data/shared/<file_id>/pieces/<index>.part
+  * /data/downloads/<file_id>.tmp (sparse file with piece offsets)
+* On shutdown, save active transfers state for resume.
+
+# 12 | CLI / UI
+
+CLI commands:
+
+* `share <path>` → create manifest, add to DHT STORE
+* `search <file_id|name>` → FIND_VALUE / query DHT
+* `download <file_id> [--out dir]`
+* `status` → show active transfers, peers
+* `peers` → list known peers
+* `stop <download_id>`
+* `unshare <file_id>`
+
+Optional GUI: show progress bars, swarm health, peer list, graph of speeds.
+
+# 13 | Testing & metrics
+
+* Unit tests for: hashing, piece verification, manifest parsing, bitfield operations.
+* Integration tests:
+
+  * Local multi-process tests (spawn 3-5 peers on localhost) to test discovery, STORE/FIND_VALUE, download.
+  * NAT simulation: run peers behind simulated NAT to validate hole punching.
+* Performance tests:
+
+  * Measure throughput with many peers and large files.
+* Metrics: expose Prometheus-style metrics endpoint (optional) or logs: connections, upload/download rates, peer counts.
+
+# 14 | Error handling & resilience
+
+* Retries with backoff on failed requests.
+* Detect and isolate malicious peers (serve bad pieces): implement blacklist on repeated bad pieces (failed hash verification).
+* Handle peers that lie about bitfields (verify).
+* Use timeouts and cancel stale requests.
+
+# 15 | Directory layout (пример)
+
+```
+p2p/
+├─ src/
+│  ├─ main.cpp
+│  ├─ network/
+│  │  ├─ connection.cpp
+│  │  ├─ protocol.cpp
+│  ├─ dht/
+│  │  ├─ kbucket.cpp
+│  │  ├─ routing_table.cpp
+│  ├─ storage/
+│  │  ├─ sqlite_store.cpp
+│  ├─ files/
+│  │  ├─ manifest.cpp
+│  │  ├─ chunker.cpp
+│  ├─ transfer/
+│  │  ├─ download_manager.cpp
+│  ├─ crypto/
+│  │  ├─ identity.cpp
+│  └─ cli/
+│     ├─ cli.cpp
+├─ include/
+├─ tests/
+├─ CMakeLists.txt
+└─ docs/
+```
+
+# 16 | Примери на ключови структури/псевдокод
+
+## Manifest struct (псевдо-C++)
+
+```cpp
+struct Manifest {
+    std::string file_name;
+    uint64_t file_size;
+    uint32_t piece_size;
+    uint32_t pieces_count;
+    std::vector<std::array<uint8_t,32>> piece_hashes; // SHA256 per piece
+    std::array<uint8_t,32> root_hash; // e.g. SHA256 of concatenated piece hashes or merkle root
+    std::vector<uint8_t> signer_pubkey; // optional
+    std::vector<uint8_t> signature; // optional
+};
+```
+
+## Message framing (псевдо)
+
+```
+[uint32 length (4 bytes)] [uint8 msg_type] [payload bytes...]
+```
+
+## Request/response flow за download
+
+1. Peer A: търси fileID (FIND_VALUE в DHT)
+2. Получава manifest + list of peers (IP:port, peer_id)
+3. Свързва се към няколко peers, обмен на HANDSHAKE
+4. Получава BITFIELD/HAVE
+5. Започва piece selection (rarest-first) и изпраща REQUEST_PIECE
+6. Получава PIECE, верифицира SHA-256; при успех записва и маркира piece като completed
+7. Когато всички pieces готови → assemble file, rename .tmp -> real file
+
+# 17 | Edge cases & защита от злоупотреби
+
+* Replay attacks: use nonces in handshake.
+* Sybil attacks: трудно да се предотврати в напълно open P2P; можеш да използваш reputation scoring и rate limits.
+* Spoofed manifests: подписване на manifests + optional web-of-trust.
+
+# 18 | Milestones (конкретни стъпки за изпълнение)
+
+(Не давам времеви оценки — само ясно разделение на задачите и acceptance criteria.)
+
+**Milestone 1 — Project skeleton & basic networking**
+
+* Setup CMake, project layout.
+* Implement ASIO-based TCP server & client, simple HANDSHAKE.
+* CLI scaffold: `start`, `stop`, `peers`.
+* Acceptance: two peers on localhost могат да се свържат и разменят HANDSHAKE.
+
+**Milestone 2 — File manifest & chunking**
+
+* Implement manifest generation for a file (piece hashing).
+* Implement local storage of pieces and manifest.
+* Acceptance: create manifest, reconstruct file from pieces locally (verify SHA256).
+
+**Milestone 3 — Simple file transfer (single peer)**
+
+* Implement REQUEST_PIECE / PIECE exchange between two peers.
+* Implement download manager + piece verification + resume.
+* Acceptance: peer A seeds file, peer B downloads it fully and verification passes.
+
+**Milestone 4 — Bitfield & multi-peer download**
+
+* Implement BITFIELD, HAVE messages.
+* Support multiple simultaneous connections.
+* Implement basic piece selection (round-robin / rarest-first).
+* Acceptance: peer downloads from >1 peers at once and assembles file.
+
+**Milestone 5 — DHT (peer discovery)**
+
+* Implement Kademlia-like routing table and RPCs (PING, FIND_NODE, FIND_VALUE, STORE).
+* Bootstrap with a few nodes.
+* Acceptance: peer can STORE manifest and another peer FIND_VALUE to retrieve it.
+
+**Milestone 6 — Security & NAT traversal**
+
+* Add identity keypair, authenticated handshake, encrypted channels (libsodium).
+* Integrate STUN client and UPnP as NAT traversal helpers, implement simple hole-punching flow and relay fallback.
+* Acceptance: peers behind different NATs can connect via hole-punch or relay.
+
+**Milestone 7 — Robustness & production features**
+
+* Throttling, blacklisting, persistence (SQLite), logging, metrics.
+* Tests & CI.
+* Optional GUI.
+
+# 19 | Acceptance criteria / testing checklist (summary)
+
+* Manifest creation and verification works for various file sizes (small & very large).
+* Downloads can resume after process restart.
+* Multiple peers improve aggregate throughput.
+* DHT stores and retrieves manifests reliably across nodes.
+* Encryption handshake prevents MITM (validate with test vectors).
+* Bad pieces are detected and misbehaving peers are penalized.
+
+# 20 | Extra опции (future/advanced)
+
+* Merkle tree manifests to allow partial verification and efficient proof of piece.
+* Erasure coding (Reed-Solomon) for better resilience (peers missing pieces).
+* Incentive mechanism (credit system) за upload/download fairness.
+* WebRTC datachannel support for browser-based peers.
+* Plugin system за custom search providers.
+
+# 21 | Practical implementation tips / pitfalls
+
+* Disk IO: използвай preallocated sparse files for streaming pieces into correct offsets to avoid fragmentation.
+* Avoid blocking in network callbacks — offload heavy tasks to thread pool.
+* Use bitset representations efficiently (std::vector<uint8_t> or boost::dynamic_bitset).
+* Careful with endianness in network fields — standardize on network byte order.
+* Testing NAT traversal needs real network / cloud VMs — simulate locally as possible, but real networks reveal more issues.
+
+# 22 | Примерни зависимости в CMake (snippet)
+
+```cmake
+find_package(Threads REQUIRED)
+add_subdirectory(third_party/asio)
+find_package(SQLite3 REQUIRED)
+# libsodium
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED libsodium)
+```
+
+# 23 | Как да започнеш веднага (конкретен next step)
+
+1. Създай репо с CMake skeleton.
+2. Имплементирай минимален TCP server/client с ASIO и HANDSHAKE message.
+3. Направи CLI команда `share <path>` която генерира manifest и го записва локално.
+4. После направи `download <file_id>` за single-peer transfer (Milestone 1–3).
+
+Ако искаш, мога веднага да ти:
+
+* напиша **CMakeLists + minimal main.cpp + ASIO client/server skeleton**, или
+* да ти генерирам **Manifest generator + piece hasher** код, или
+* да ти дам **пълен пример на binary message framing + обектен design** (файлове и класове).
+
+Кажи ми коя стъпка искаш да ти кода — ще ти дам реален, компилируем пример, с пояснения.
+
