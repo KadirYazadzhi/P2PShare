@@ -1,6 +1,6 @@
 #include "dht/dht_node.hpp"
 #include "network/protocol.hpp"
-#include "common/serializer.hpp" // Added this line
+#include "common/serializer.hpp"
 #include <iostream>
 #include <iomanip> // For std::setw, std::setfill
 #include <random>
@@ -11,8 +11,10 @@ namespace dht {
 // Helper to generate a random NodeID
 NodeID generate_random_id() {
     NodeID id;
+    std::random_device rd;
+    std::mt19937 gen(rd());
     for (size_t i = 0; i < NODE_ID_SIZE; ++i) {
-        id[i] = rand() % 256;
+        id[i] = gen() % 256; // Use a better random number generation
     }
     return id;
 }
@@ -24,7 +26,7 @@ DhtNode::DhtNode(asio::io_context& io_context, uint16_t port, StorageManager& st
       routing_table_(self_id_),
       refresh_timer_(io_context),
       nat_traversal_(),
-      storage_manager_(storage_manager) { // Initialize NatTraversal and StorageManager
+      storage_manager_(storage_manager) {
     
     std::cout << "DHT Node created. ID: ";
     for(uint8_t byte : self_id_) {
@@ -48,18 +50,39 @@ void DhtNode::start() {
         std::cout << "Loaded peer " << peer.endpoint << " from storage." << std::endl;
     }
 
-    // Try to discover NAT and map port
+    // Try to discover NAT and map port via UPnP
     if (nat_traversal_.discover_devices()) {
-        external_ip_ = nat_traversal_.get_external_ip();
-        if (!external_ip_.empty()) {
+        std::string discovered_ip = nat_traversal_.get_external_ip();
+        if (!discovered_ip.empty()) {
+            external_ip_ = discovered_ip;
             external_port_ = socket_.local_endpoint().port();
             if (nat_traversal_.add_port_mapping(external_port_, external_port_, "P2PShare DHT UDP", "UDP")) {
-                std::cout << "Successfully mapped UDP port " << external_port_ << " to external IP " << external_ip_ << std::endl;
+                std::cout << "Successfully mapped UDP port " << external_port_ << " to external IP " << external_ip_ << " via UPnP." << std::endl;
             } else {
-                std::cerr << "Failed to add UDP port mapping." << std::endl;
+                std::cerr << "Failed to add UDP port mapping via UPnP." << std::endl;
             }
         }
     }
+
+    // Perform STUN request to get external IP and port (even if UPnP succeeded, as a fallback/alternative)
+    std::cout << "Performing STUN request for external IP/port..." << std::endl;
+    std::optional<asio::ip::udp::endpoint> stun_result = nat_traversal_.perform_stun_request(io_context_, socket_.local_endpoint());
+
+    if (stun_result) {
+        external_ip_ = stun_result->address().to_string();
+        external_port_ = stun_result->port();
+        std::cout << "STUN: Discovered external IP: " << external_ip_ << ":" << external_port_ << std::endl;
+    } else {
+        std::cerr << "STUN: Failed to discover external IP/port." << std::endl;
+    }
+
+    // Store our own external endpoint in NodeInfo for propagation
+    NodeInfo self_node_info = {self_id_, socket_.local_endpoint()};
+    if (!external_ip_.empty() && external_port_ != 0) {
+        self_node_info.external_endpoint = asio::ip::udp::endpoint(asio::ip::make_address(external_ip_), external_port_);
+    }
+    // Add ourselves to our own routing table (useful for testing, not strictly Kademlia standard)
+    routing_table_.add_node(self_node_info);
 
     read_message();
     schedule_refresh();
@@ -125,15 +148,21 @@ void DhtNode::handle_message(const std::vector<uint8_t>& data, const asio::ip::u
 
     switch (type) {
         case MessageType::DHT_PING: {
-            if (data.size() < sizeof(MessageType) + dht::NODE_ID_SIZE + sizeof(uint16_t)) { // Min size for PingPayload
+            if (data.size() < sizeof(MessageType) + dht::NODE_ID_SIZE + sizeof(uint16_t) + sizeof(asio::ip::address_v4::bytes_type) + sizeof(uint16_t)) { // Min size for PingPayload
                 std::cerr << "Malformed DHT_PING message." << std::endl;
                 return;
             }
             std::vector<uint8_t> payload_data(data.begin() + sizeof(MessageType), data.end());
             DhtPingPayload ping_payload = Serializer::deserialize_dht_ping_payload(payload_data);
             
-            // Add sender to routing table and save to storage
+            // Construct NodeInfo with both internal and external endpoints
             NodeInfo sender_node_info = {ping_payload.sender_id, asio::ip::udp::endpoint(sender.address(), ping_payload.sender_port)};
+            
+            asio::ip::address_v4 external_addr(ping_payload.sender_external_ip);
+            if (external_addr != asio::ip::address_v4()) { // Only set if external IP is not default
+                sender_node_info.external_endpoint = asio::ip::udp::endpoint(external_addr, ping_payload.sender_external_port);
+            }
+
             routing_table_.add_node(sender_node_info);
             storage_manager_.save_peer(sender_node_info);
 
@@ -150,9 +179,8 @@ void DhtNode::handle_message(const std::vector<uint8_t>& data, const asio::ip::u
             DhtPongPayload pong_payload = Serializer::deserialize_dht_pong_payload(payload_data);
 
             // Add sender to routing table and save to storage
-            NodeInfo sender_node_info = {pong_payload.sender_id, sender}; // Use sender's actual port for pong
-            routing_table_.add_node(sender_node_info);
-            storage_manager_.save_peer(sender_node_info);
+            routing_table_.add_node({pong_payload.sender_id, sender}); // Use sender's actual port for pong, external endpoint will be updated via PING
+            storage_manager_.save_peer({pong_payload.sender_id, sender});
             std::cout << "Received PONG from " << sender << ". Added to routing table." << std::endl;
             break;
         }
@@ -245,6 +273,26 @@ void DhtNode::handle_message(const std::vector<uint8_t>& data, const asio::ip::u
             }
             break;
         }
+        case MessageType::HOLE_PUNCH_REQUEST: {
+            std::vector<uint8_t> payload_data(data.begin() + sizeof(MessageType), data.end());
+            HolePunchRequestPayload payload = Serializer::deserialize_hole_punch_request_payload(payload_data);
+
+            // Immediately send a HOLE_PUNCH_RESPONSE back to the sender's actual UDP endpoint
+            // The payload will contain THIS node's external IP/port
+            asio::ip::udp::endpoint self_external_endpoint(asio::ip::make_address(external_ip_), external_port_);
+            send_hole_punch_response(sender, self_external_endpoint);
+            std::cout << "Received HOLE_PUNCH_REQUEST from " << sender << ". Sent HOLE_PUNCH_RESPONSE." << std::endl;
+            break;
+        }
+        case MessageType::HOLE_PUNCH_RESPONSE: {
+            std::vector<uint8_t> payload_data(data.begin() + sizeof(MessageType), data.end());
+            HolePunchResponsePayload payload = Serializer::deserialize_hole_punch_response_payload(payload_data);
+            std::cout << "Received HOLE_PUNCH_RESPONSE from " << sender << ". External endpoint of sender: " 
+                      << asio::ip::address_v4(payload.sender_external_ip) << ":" << payload.sender_external_port << std::endl;
+            // This indicates a successful hole-punch from the perspective of the initiator.
+            // Further actions (e.g., initiating a TCP connection) can be triggered here.
+            break;
+        }
         default:
             std::cerr << "Unknown DHT message type." << std::endl;
             break;
@@ -262,6 +310,16 @@ void DhtNode::send_ping(const asio::ip::udp::endpoint& target_endpoint) {
     DhtPingPayload payload;
     payload.sender_id = self_id_;
     payload.sender_port = socket_.local_endpoint().port(); // Our listening port
+
+    // Populate external IP/Port if discovered
+    if (!external_ip_.empty() && external_port_ != 0) {
+        payload.sender_external_ip = asio::ip::make_address(external_ip_).to_v4().to_bytes();
+        payload.sender_external_port = external_port_;
+    } else {
+        // Default to 0.0.0.0:0 if no external IP discovered
+        payload.sender_external_ip = asio::ip::address_v4().to_bytes();
+        payload.sender_external_port = 0;
+    }
 
     std::vector<uint8_t> message_data;
     message_data.push_back(static_cast<uint8_t>(MessageType::DHT_PING));
@@ -383,8 +441,45 @@ void DhtNode::send_find_value_response(const asio::ip::udp::endpoint& target_end
         });
 }
 
+void DhtNode::send_hole_punch_request(const asio::ip::udp::endpoint& target_endpoint, const asio::ip::udp::endpoint& sender_external_endpoint) {
+    HolePunchRequestPayload payload;
+    std::memcpy(payload.sender_external_ip.data(), sender_external_endpoint.address().to_v4().to_bytes().data(), 4);
+    payload.sender_external_port = sender_external_endpoint.port();
 
+    std::vector<uint8_t> message_data;
+    message_data.push_back(static_cast<uint8_t>(MessageType::HOLE_PUNCH_REQUEST));
+    std::vector<uint8_t> serialized_payload = Serializer::serialize_hole_punch_request_payload(payload);
+    message_data.insert(message_data.end(), serialized_payload.begin(), serialized_payload.end());
 
+    socket_.async_send_to(asio::buffer(message_data), target_endpoint,
+        [this, target_endpoint](const asio::error_code& error, size_t bytes_transferred) {
+            if (!error) {
+                std::cout << "Sent HOLE_PUNCH_REQUEST to " << target_endpoint << std::endl;
+            } else {
+                std::cerr << "Error sending HOLE_PUNCH_REQUEST to " << target_endpoint << ": " << error.message() << std::endl;
+            }
+        });
+}
+
+void DhtNode::send_hole_punch_response(const asio::ip::udp::endpoint& target_endpoint, const asio::ip::udp::endpoint& sender_external_endpoint) {
+    HolePunchResponsePayload payload;
+    std::memcpy(payload.sender_external_ip.data(), sender_external_endpoint.address().to_v4().to_bytes().data(), 4);
+    payload.sender_external_port = sender_external_endpoint.port();
+
+    std::vector<uint8_t> message_data;
+    message_data.push_back(static_cast<uint8_t>(MessageType::HOLE_PUNCH_RESPONSE));
+    std::vector<uint8_t> serialized_payload = Serializer::serialize_hole_punch_response_payload(payload);
+    message_data.insert(message_data.end(), serialized_payload.begin(), serialized_payload.end());
+
+    socket_.async_send_to(asio::buffer(message_data), target_endpoint,
+        [this, target_endpoint](const asio::error_code& error, size_t bytes_transferred) {
+            if (!error) {
+                std::cout << "Sent HOLE_PUNCH_RESPONSE to " << target_endpoint << std::endl;
+            } else {
+                std::cerr << "Error sending HOLE_PUNCH_RESPONSE to " << target_endpoint << ": " << error.message() << std::endl;
+            }
+        });
+}
 
 void dht::DhtNode::start_find_node_lookup(dht::NodeID target_id, std::function<void(const std::vector<dht::NodeInfo>&)> callback) {
     std::cout << "Starting FIND_NODE lookup for target: " << target_id[0] << "..." << std::endl;

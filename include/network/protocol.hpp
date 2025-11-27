@@ -37,6 +37,10 @@ enum class MessageType : uint8_t {
     DHT_FIND_VALUE = 15,
     DHT_FIND_VALUE_RESPONSE = 16,
 
+    // NAT Traversal messages (UDP)
+    HOLE_PUNCH_REQUEST = 20,
+    HOLE_PUNCH_RESPONSE = 21,
+
     // ... other message types
     ERROR_UNSPECIFIED = 255
 };
@@ -46,7 +50,7 @@ struct HandshakePayload {
     std::array<uint8_t, PUBKEY_SIZE> pubkey;
     uint16_t protocol_version;
     uint16_t listen_port;
-    std::array<uint8_t, PEER_ID_SIZE> peer_id;
+    dht::NodeID peer_id; // Changed to dht::NodeID
     uint32_t features; // Bitmap for features
 };
 
@@ -64,10 +68,23 @@ struct HavePayload {
     uint32_t piece_index;
 };
 
+// NAT Traversal Payloads (UDP)
+struct HolePunchRequestPayload {
+    asio::ip::address_v4::bytes_type sender_external_ip;
+    uint16_t sender_external_port;
+};
+
+struct HolePunchResponsePayload {
+    asio::ip::address_v4::bytes_type sender_external_ip;
+    uint16_t sender_external_port;
+};
+
 // DHT Payloads
 struct DhtPingPayload {
     dht::NodeID sender_id;
     uint16_t sender_port; // Port on which sender is listening for UDP
+    asio::ip::address_v4::bytes_type sender_external_ip; // External IP
+    uint16_t sender_external_port; // External port
 };
 
 struct DhtPongPayload {
@@ -101,7 +118,6 @@ struct DhtFindValueResponsePayload {
     // Followed by variable length: [found (uint8)][value_len (uint32)][value_data...] OR [found (uint8)][node_count (uint32)][NodeInfo1][NodeInfo2]...
 };
 
-#pragma pack(pop)
 #pragma pack(pop)
 
 // Note: SEARCH_RESPONSE, PIECE, and BITFIELD messages have variable-sized payloads.

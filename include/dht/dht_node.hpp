@@ -13,6 +13,9 @@
 
 namespace dht {
 
+// Helper to generate a random NodeID
+NodeID generate_random_id();
+
 // Forward declaration
 class DhtNode;
 
@@ -58,6 +61,16 @@ public:
     // Kademlia Lookup methods
     void start_find_node_lookup(NodeID target_id, std::function<void(const std::vector<NodeInfo>&)> callback);
     void start_find_value_lookup(NodeID key, std::function<void(const std::optional<std::vector<uint8_t>>&, const std::vector<NodeInfo>&)> callback);
+
+    // Hole-punching RPCs
+    void send_hole_punch_request(const asio::ip::udp::endpoint& target_endpoint, const asio::ip::udp::endpoint& sender_external_endpoint);
+    void send_hole_punch_response(const asio::ip::udp::endpoint& target_endpoint, const asio::ip::udp::endpoint& sender_external_endpoint);
+
+    // Public accessors for testing
+    std::map<NodeID, std::vector<uint8_t>>& get_stored_values() { return stored_values_; }
+    asio::io_context& get_io_context() { return io_context_; }
+    std::string get_external_ip() const { return external_ip_; }
+    uint16_t get_external_port() const { return external_port_; }
 
 private:
     void read_message();

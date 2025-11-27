@@ -11,6 +11,8 @@
 #include "connection.hpp"
 #include "protocol.hpp"
 #include "../files/download_manager.hpp"
+#include "../dht/dht_node.hpp" // For dht::generate_random_id()
+#include "../crypto/hasher.hpp" // For hash_t (pubkey type)
 
 class Client {
 public:
@@ -18,24 +20,28 @@ public:
     using on_connect_handler_t = std::function<void(std::shared_ptr<Connection>)>;
 
     Client(asio::io_context& io_context, message_handler_t handler, asio::ssl::context& ssl_context)
-        : io_context_(io_context), message_handler_(handler), ssl_context_(ssl_context) { // Initialize SSL context
-        // init_ssl_context(); // No longer needed as context is passed in
+        : io_context_(io_context), message_handler_(handler), ssl_context_(ssl_context),
+          peer_id_(dht::generate_random_id()), // Generate a random peer ID
+          pubkey_() { // Initialize pubkey (will be filled with actual key later)
+        // For now, fill pubkey with dummy data
+        for(size_t i = 0; i < PUBKEY_SIZE; ++i) {
+            pubkey_[i] = static_cast<uint8_t>(std::rand() % 256);
+        }
     }
 
 private:
 
     void send_handshake(std::shared_ptr<Connection> connection) {
         HandshakePayload hs_payload;
-        hs_payload.pubkey.fill(0x01);
+        hs_payload.pubkey = pubkey_; // Use client's generated pubkey
         hs_payload.protocol_version = PROTOCOL_VERSION;
-        hs_payload.listen_port = 6881;
-        hs_payload.peer_id.fill(0x02);
-        hs_payload.features = 0;
+        hs_payload.listen_port = connection->socket().local_endpoint().port(); // Use actual local port
+        hs_payload.peer_id = peer_id_; // Use client's generated peer ID
+        hs_payload.features = 0; // No features yet
 
         Message handshake_msg;
         handshake_msg.type = MessageType::HANDSHAKE;
-        handshake_msg.payload.resize(sizeof(hs_payload));
-        std::memcpy(handshake_msg.payload.data(), &hs_payload, sizeof(hs_payload));
+        handshake_msg.payload = Serializer::serialize_handshake_payload(hs_payload);
         
         connection->send_message(handshake_msg);
         std::cout << "Sent HANDSHAKE message.\n";
@@ -59,13 +65,20 @@ public:
             [this, conn, on_connect](const asio::error_code& error) {
                 if (!error) {
                     std::cout << "Connected to " << conn->socket().remote_endpoint() << std::endl;
-                    conn->start(asio::ssl::stream_base::client); // Start SSL handshake
-                    send_handshake(conn);
-                    if (on_connect) {
-                        on_connect(conn);
-                    }
+                    // Start SSL handshake and provide a callback for success
+                    conn->start(asio::ssl::stream_base::client, [this, conn, on_connect] {
+                        // This code runs AFTER SSL is established
+                        send_handshake(conn);
+                        if (on_connect) {
+                            on_connect(conn);
+                        }
+                    });
                 } else {
                     std::cerr << "Error connecting: " << error.message() << std::endl;
+                    // If connection fails, we need to signal the on_connect handler
+                    if (on_connect) {
+                        on_connect(nullptr);
+                    }
                 }
             });
     }
@@ -74,6 +87,8 @@ private:
     asio::io_context& io_context_;
     message_handler_t message_handler_;
     asio::ssl::context& ssl_context_; // Added SSL context
+    dht::NodeID peer_id_;
+    std::array<uint8_t, PUBKEY_SIZE> pubkey_; // Assuming PUBKEY_SIZE is defined in protocol.hpp
 };
 
 #endif //P2P_CLIENT_HPP

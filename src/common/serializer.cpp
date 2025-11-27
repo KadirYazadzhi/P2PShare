@@ -1,6 +1,7 @@
 #include "common/serializer.hpp"
 #include <cstring> // For std::memcpy
 #include <optional>
+#include <algorithm> // For std::copy
 
 namespace Serializer {
 
@@ -63,9 +64,11 @@ Manifest deserialize_manifest(const std::vector<uint8_t>& buffer) {
 
 std::vector<uint8_t> serialize_dht_ping_payload(const DhtPingPayload& p) {
     std::vector<uint8_t> buffer;
-    buffer.reserve(dht::NODE_ID_SIZE + sizeof(uint16_t));
+    buffer.reserve(dht::NODE_ID_SIZE + sizeof(uint16_t) + sizeof(asio::ip::address_v4::bytes_type) + sizeof(uint16_t));
     buffer.insert(buffer.end(), p.sender_id.begin(), p.sender_id.end());
     buffer.insert(buffer.end(), (uint8_t*)&p.sender_port, (uint8_t*)&p.sender_port + sizeof(uint16_t));
+    buffer.insert(buffer.end(), p.sender_external_ip.begin(), p.sender_external_ip.end());
+    buffer.insert(buffer.end(), (uint8_t*)&p.sender_external_port, (uint8_t*)&p.sender_external_port + sizeof(uint16_t));
     return buffer;
 }
 
@@ -75,6 +78,10 @@ DhtPingPayload deserialize_dht_ping_payload(const std::vector<uint8_t>& buffer) 
     std::memcpy(p.sender_id.data(), buffer.data() + offset, dht::NODE_ID_SIZE);
     offset += dht::NODE_ID_SIZE;
     std::memcpy(&p.sender_port, buffer.data() + offset, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+    std::memcpy(p.sender_external_ip.data(), buffer.data() + offset, sizeof(asio::ip::address_v4::bytes_type));
+    offset += sizeof(asio::ip::address_v4::bytes_type);
+    std::memcpy(&p.sender_external_port, buffer.data() + offset, sizeof(uint16_t));
     return p;
 }
 
@@ -116,18 +123,22 @@ std::vector<uint8_t> serialize_dht_find_node_response_payload(const dht::NodeID&
 
     for (const auto& node : nodes) {
         buffer.insert(buffer.end(), node.id.begin(), node.id.end());
-        // Serialize IP address
-        asio::ip::address_v4::bytes_type ipv4_bytes;
-        asio::ip::address_v6::bytes_type ipv6_bytes;
-        if (node.endpoint.address().is_v4()) {
-            ipv4_bytes = node.endpoint.address().to_v4().to_bytes();
-            buffer.insert(buffer.end(), ipv4_bytes.begin(), ipv4_bytes.end());
-        } else { // is_v6
-            ipv6_bytes = node.endpoint.address().to_v6().to_bytes();
-            buffer.insert(buffer.end(), ipv6_bytes.begin(), ipv6_bytes.end());
-        }
+        // Serialize endpoint (address and port)
+        asio::ip::address_v4::bytes_type addr_bytes = node.endpoint.address().to_v4().to_bytes(); // Assuming IPv4
+        buffer.insert(buffer.end(), addr_bytes.begin(), addr_bytes.end());
         uint16_t port = node.endpoint.port();
         buffer.insert(buffer.end(), (uint8_t*)&port, (uint8_t*)&port + sizeof(uint16_t));
+
+        // Serialize external_endpoint (optional)
+        if (node.external_endpoint) {
+            buffer.push_back(1); // Flag: external_endpoint is present
+            asio::ip::address_v4::bytes_type ext_addr_bytes = node.external_endpoint->address().to_v4().to_bytes();
+            buffer.insert(buffer.end(), ext_addr_bytes.begin(), ext_addr_bytes.end());
+            uint16_t ext_port = node.external_endpoint->port();
+            buffer.insert(buffer.end(), (uint8_t*)&ext_port, (uint8_t*)&ext_port + sizeof(uint16_t));
+        } else {
+            buffer.push_back(0); // Flag: external_endpoint is not present
+        }
     }
     return buffer;
 }
@@ -150,7 +161,6 @@ std::pair<dht::NodeID, std::vector<dht::NodeInfo>> deserialize_dht_find_node_res
         offset += dht::NODE_ID_SIZE;
 
         asio::ip::address addr;
-        // Assuming IPv4 for simplicity for now, need to handle IPv6
         asio::ip::address_v4::bytes_type ipv4_bytes;
         std::memcpy(ipv4_bytes.data(), buffer.data() + offset, ipv4_bytes.size());
         addr = asio::ip::address_v4(ipv4_bytes);
@@ -160,7 +170,22 @@ std::pair<dht::NodeID, std::vector<dht::NodeInfo>> deserialize_dht_find_node_res
         std::memcpy(&port, buffer.data() + offset, sizeof(uint16_t));
         offset += sizeof(uint16_t);
 
-        nodes.push_back({id, asio::ip::udp::endpoint(addr, port)});
+        std::optional<asio::ip::udp::endpoint> external_endpoint;
+        uint8_t has_external_endpoint;
+        if (offset + sizeof(uint8_t) <= buffer.size()) { // Check if flag is available
+            has_external_endpoint = buffer[offset];
+            offset += sizeof(uint8_t);
+            if (has_external_endpoint == 1) {
+                asio::ip::address_v4::bytes_type ext_ipv4_bytes;
+                std::memcpy(ext_ipv4_bytes.data(), buffer.data() + offset, ext_ipv4_bytes.size());
+                offset += ext_ipv4_bytes.size();
+                uint16_t ext_port;
+                std::memcpy(&ext_port, buffer.data() + offset, sizeof(uint16_t));
+                offset += sizeof(uint16_t);
+                external_endpoint = asio::ip::udp::endpoint(asio::ip::address_v4(ext_ipv4_bytes), ext_port);
+            }
+        }
+        nodes.push_back({id, asio::ip::udp::endpoint(addr, port), external_endpoint});
     }
     return {target_id, nodes};
 }
@@ -269,6 +294,171 @@ std::pair<hash_t, uint32_t> deserialize_have_payload(const std::vector<uint8_t>&
     std::memcpy(&piece_index, buffer.data() + offset, sizeof(uint32_t));
     
     return {root_hash, piece_index};
+}
+
+std::vector<uint8_t> serialize_handshake_payload(const HandshakePayload& p) {
+    std::vector<uint8_t> buffer;
+    buffer.reserve(PUBKEY_SIZE + sizeof(uint16_t) + sizeof(uint16_t) + dht::NODE_ID_SIZE + sizeof(uint32_t));
+
+    buffer.insert(buffer.end(), p.pubkey.begin(), p.pubkey.end());
+    buffer.insert(buffer.end(), (uint8_t*)&p.protocol_version, (uint8_t*)&p.protocol_version + sizeof(uint16_t));
+    buffer.insert(buffer.end(), (uint8_t*)&p.listen_port, (uint8_t*)&p.listen_port + sizeof(uint16_t));
+    buffer.insert(buffer.end(), p.peer_id.begin(), p.peer_id.end());
+    buffer.insert(buffer.end(), (uint8_t*)&p.features, (uint8_t*)&p.features + sizeof(uint32_t));
+
+    return buffer;
+}
+
+HandshakePayload deserialize_handshake_payload(const std::vector<uint8_t>& buffer) {
+    HandshakePayload p;
+    size_t offset = 0;
+
+    std::memcpy(p.pubkey.data(), buffer.data() + offset, PUBKEY_SIZE);
+    offset += PUBKEY_SIZE;
+
+    std::memcpy(&p.protocol_version, buffer.data() + offset, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+
+    std::memcpy(&p.listen_port, buffer.data() + offset, sizeof(uint16_t));
+    offset += sizeof(uint16_t);
+
+    std::memcpy(p.peer_id.data(), buffer.data() + offset, dht::NODE_ID_SIZE);
+    offset += dht::NODE_ID_SIZE;
+
+    std::memcpy(&p.features, buffer.data() + offset, sizeof(uint32_t));
+    offset += sizeof(uint32_t);
+
+    return p;
+}
+
+std::vector<uint8_t> serialize_request_piece_payload(const RequestPiecePayload& p) {
+    std::vector<uint8_t> buffer(sizeof(RequestPiecePayload));
+    std::memcpy(buffer.data(), &p, sizeof(RequestPiecePayload));
+    return buffer;
+}
+
+RequestPiecePayload deserialize_request_piece_payload(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() != sizeof(RequestPiecePayload)) {
+        throw std::runtime_error("Invalid buffer size for request piece payload deserialization");
+    }
+    RequestPiecePayload p;
+    std::memcpy(&p, buffer.data(), sizeof(RequestPiecePayload));
+    return p;
+}
+
+std::vector<uint8_t> serialize_piece_payload(const hash_t& root_hash, uint32_t piece_index, const std::vector<uint8_t>& data) {
+    std::vector<uint8_t> buffer;
+    buffer.reserve(sizeof(hash_t) + sizeof(uint32_t) + data.size());
+
+    // Append root_hash
+    buffer.insert(buffer.end(), root_hash.begin(), root_hash.end());
+
+    // Append piece_index
+    const uint8_t* index_bytes = reinterpret_cast<const uint8_t*>(&piece_index);
+    buffer.insert(buffer.end(), index_bytes, index_bytes + sizeof(uint32_t));
+
+    // Append piece data
+    buffer.insert(buffer.end(), data.begin(), data.end());
+
+    return buffer;
+}
+
+std::tuple<hash_t, uint32_t, std::vector<uint8_t>> deserialize_piece_payload(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() < sizeof(hash_t) + sizeof(uint32_t)) {
+        throw std::runtime_error("Invalid buffer size for piece payload deserialization");
+    }
+
+    hash_t root_hash;
+    uint32_t piece_index;
+    std::vector<uint8_t> data;
+    size_t offset = 0;
+
+    // Extract root_hash
+    std::copy(buffer.begin() + offset, buffer.begin() + offset + sizeof(hash_t), root_hash.begin());
+    offset += sizeof(hash_t);
+
+    // Extract piece_index
+    piece_index = *reinterpret_cast<const uint32_t*>(&buffer[offset]);
+    offset += sizeof(uint32_t);
+
+    // The rest is the data
+    data.assign(buffer.begin() + offset, buffer.end());
+
+    return {root_hash, piece_index, data};
+}
+
+std::vector<uint8_t> serialize_bitfield_payload(const hash_t& root_hash, const Bitfield& bitfield) {
+    std::vector<uint8_t> buffer;
+    buffer.reserve(sizeof(hash_t) + sizeof(uint64_t) + bitfield.get_bytes().size());
+
+    // Append root_hash
+    buffer.insert(buffer.end(), root_hash.begin(), root_hash.end());
+
+    // Append num_bits
+    uint64_t num_bits = bitfield.get_num_bits();
+    const uint8_t* num_bits_bytes = reinterpret_cast<const uint8_t*>(&num_bits);
+    buffer.insert(buffer.end(), num_bits_bytes, num_bits_bytes + sizeof(uint64_t));
+
+    // Append bitfield data
+    buffer.insert(buffer.end(), bitfield.get_bytes().begin(), bitfield.get_bytes().end());
+
+    return buffer;
+}
+
+std::tuple<hash_t, Bitfield> deserialize_bitfield_payload(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() < sizeof(hash_t) + sizeof(uint64_t)) {
+        throw std::runtime_error("Invalid buffer size for bitfield payload deserialization");
+    }
+
+    hash_t root_hash;
+    uint64_t num_bits;
+    std::vector<uint8_t> bitfield_bytes;
+    size_t offset = 0;
+
+    // Extract root_hash
+    std::copy(buffer.begin() + offset, buffer.begin() + offset + sizeof(hash_t), root_hash.begin());
+    offset += sizeof(hash_t);
+
+    // Extract num_bits
+    num_bits = *reinterpret_cast<const uint64_t*>(&buffer[offset]);
+    offset += sizeof(uint64_t);
+
+    // The rest is the bitfield data
+    bitfield_bytes.assign(buffer.begin() + offset, buffer.end());
+
+    Bitfield bitfield(num_bits, bitfield_bytes);
+
+    return {root_hash, bitfield};
+}
+
+std::vector<uint8_t> serialize_hole_punch_request_payload(const HolePunchRequestPayload& p) {
+    std::vector<uint8_t> buffer(sizeof(HolePunchRequestPayload));
+    std::memcpy(buffer.data(), &p, sizeof(HolePunchRequestPayload));
+    return buffer;
+}
+
+HolePunchRequestPayload deserialize_hole_punch_request_payload(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() != sizeof(HolePunchRequestPayload)) {
+        throw std::runtime_error("Invalid buffer size for hole punch request payload deserialization");
+    }
+    HolePunchRequestPayload p;
+    std::memcpy(&p, buffer.data(), sizeof(HolePunchRequestPayload));
+    return p;
+}
+
+std::vector<uint8_t> serialize_hole_punch_response_payload(const HolePunchResponsePayload& p) {
+    std::vector<uint8_t> buffer(sizeof(HolePunchResponsePayload));
+    std::memcpy(buffer.data(), &p, sizeof(HolePunchResponsePayload));
+    return buffer;
+}
+
+HolePunchResponsePayload deserialize_hole_punch_response_payload(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() != sizeof(HolePunchResponsePayload)) {
+        throw std::runtime_error("Invalid buffer size for hole punch response payload deserialization");
+    }
+    HolePunchResponsePayload p;
+    std::memcpy(&p, buffer.data(), sizeof(HolePunchResponsePayload));
+    return p;
 }
 
 } // namespace Serializer

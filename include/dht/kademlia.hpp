@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <list>
 #include <asio/ip/udp.hpp>
+#include <optional> // Added for std::optional
 
 #include "../crypto/hasher.hpp" // For hash_t
 
@@ -17,7 +18,8 @@ using NodeID = std::array<uint8_t, NODE_ID_SIZE>;
 
 struct NodeInfo {
     NodeID id;
-    asio::ip::udp::endpoint endpoint;
+    asio::ip::udp::endpoint endpoint; // Internal endpoint
+    std::optional<asio::ip::udp::endpoint> external_endpoint; // Discovered external endpoint
     // Could add last_seen timestamp here
 };
 

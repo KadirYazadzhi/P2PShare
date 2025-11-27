@@ -1,13 +1,21 @@
 #include "network/server.hpp"
 #include "files/file_sharer.hpp"
 #include "files/bitfield.hpp"
-#include "common/serializer.hpp" // <--- Include new header
+#include "common/serializer.hpp"
+#include "dht/dht_node.hpp" // For dht::generate_random_id()
 #include <iostream>
+#include <iomanip> // For std::hex, std::setw, std::setfill
 
 Server::Server(asio::io_context& io_context, uint16_t port)
     : io_context_(io_context),
       acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)),
-      ssl_context_(asio::ssl::context::tlsv12_server) { // Initialize SSL context
+      ssl_context_(asio::ssl::context::tlsv12_server), // Initialize SSL context
+      peer_id_(dht::generate_random_id()), // Generate a random peer ID
+      pubkey_() { // Initialize pubkey (will be filled with actual key later)
+    // For now, fill pubkey with dummy data
+    for(size_t i = 0; i < PUBKEY_SIZE; ++i) {
+        pubkey_[i] = static_cast<uint8_t>(std::rand() % 256);
+    }
     init_ssl_context(); // Initialize SSL context with certs
     std::cout << "Server listening on port " << port << std::endl;
     start_accept();
@@ -17,10 +25,9 @@ void Server::init_ssl_context() {
     try {
         ssl_context_.set_options(
             asio::ssl::context::default_workarounds
-            | asio::ssl::context::no_sslv2
-            | asio::ssl::context::single_dh_use);
+            | asio::ssl::context::no_sslv2);
         ssl_context_.use_certificate_chain_file("server.crt"); // Placeholder
-        ssl_context_.use_private_key_file("server.key", asio::ssl::context::pem); // Placeholder
+        ssl_context_.use_private_key_file("server.key", asio::ssl::context::file_format::pem); // Placeholder
     } catch (const asio::system_error& e) {
         std::cerr << "Error initializing SSL context: " << e.what() << std::endl;
         // Handle error appropriately, e.g., exit or throw
@@ -52,7 +59,7 @@ void Server::start_accept() {
 void Server::handle_message(Message msg, std::shared_ptr<Connection> connection) {
     switch (msg.type) {
         case MessageType::HANDSHAKE:
-            std::cout << "Received HANDSHAKE from " << connection->socket().remote_endpoint() << std::endl;
+            handle_handshake(msg, connection);
             break;
         case MessageType::QUERY_SEARCH:
             handle_query_search(msg, connection);
@@ -113,6 +120,32 @@ void Server::handle_query_search(const Message& msg, std::shared_ptr<Connection>
         response.payload.push_back(0); // Found = false
         connection->send_message(response);
     }
+}
+
+void Server::handle_handshake(const Message& msg, std::shared_ptr<Connection> connection) {
+    std::cout << "Received HANDSHAKE from " << connection->socket().remote_endpoint() << std::endl;
+    HandshakePayload received_hs = Serializer::deserialize_handshake_payload(msg.payload);
+
+    // For now, just print received info
+    std::cout << "  Peer ID: ";
+    for(uint8_t byte : received_hs.peer_id) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
+    }
+    std::cout << std::dec << ", Port: " << received_hs.listen_port << std::endl;
+
+    // Send our own handshake back
+    HandshakePayload own_hs;
+    own_hs.pubkey = pubkey_;
+    own_hs.protocol_version = PROTOCOL_VERSION;
+    own_hs.listen_port = acceptor_.local_endpoint().port();
+    own_hs.peer_id = peer_id_;
+    own_hs.features = 0;
+
+    Message response_msg;
+    response_msg.type = MessageType::HANDSHAKE;
+    response_msg.payload = Serializer::serialize_handshake_payload(own_hs);
+    connection->send_message(response_msg);
+    std::cout << "Sent HANDSHAKE response to " << connection->socket().remote_endpoint() << std::endl;
 }
 
 void Server::handle_request_piece(const Message& msg, std::shared_ptr<Connection> connection) {
