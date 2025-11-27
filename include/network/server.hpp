@@ -24,6 +24,9 @@ public:
     
     // Connect to a peer
     void connect(const std::string& host, uint16_t port);
+    
+    // Advanced NAT Traversal
+    void connect_with_hole_punch(const std::string& host, uint16_t port);
 
     // Access DHT
     dht::DhtNode& get_dht_node() { return dht_node_; }

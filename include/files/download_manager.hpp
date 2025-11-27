@@ -73,6 +73,11 @@ private:
     static constexpr size_t REQUEST_WINDOW_SIZE = 5; // Max concurrent requests per peer
     std::map<std::shared_ptr<Connection>, std::set<uint32_t>> in_flight_requests_; // Pieces requested from a peer
 
+    // Robustness (Ban bad peers)
+    static constexpr int MAX_STRIKES = 3;
+    std::map<std::shared_ptr<Connection>, int> peer_strikes_;
+    void ban_peer(std::shared_ptr<Connection> peer_conn);
+
     fs::path temp_file_path_;
     fs::path final_file_path_;
     StorageManager& storage_manager_; // Added StorageManager reference

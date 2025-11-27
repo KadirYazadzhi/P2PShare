@@ -66,6 +66,11 @@ public:
     void send_hole_punch_request(const asio::ip::udp::endpoint& target_endpoint, const asio::ip::udp::endpoint& sender_external_endpoint);
     void send_hole_punch_response(const asio::ip::udp::endpoint& target_endpoint, const asio::ip::udp::endpoint& sender_external_endpoint);
 
+    // Callbacks for Server integration
+    void set_on_hole_punch_request(std::function<void(const asio::ip::udp::endpoint&)> callback) {
+        on_hole_punch_request_ = callback;
+    }
+
     // Public accessors for testing
     std::map<NodeID, std::vector<uint8_t>>& get_stored_values() { return stored_values_; }
     asio::io_context& get_io_context() { return io_context_; }
@@ -91,6 +96,8 @@ private:
     std::string external_ip_;    // Store external IP
     uint16_t external_port_;     // Store external port
     StorageManager& storage_manager_; // Added StorageManager reference
+    
+    std::function<void(const asio::ip::udp::endpoint&)> on_hole_punch_request_;
 
     void schedule_refresh();
     void refresh_k_buckets();

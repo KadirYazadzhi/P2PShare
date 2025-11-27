@@ -18,6 +18,7 @@ include_directories(third_party/json/include)
 set(SOURCES
     src/common/serializer.cpp
     src/common/rate_limiter.cpp
+    src/common/logger.cpp
     src/crypto/hasher.cpp
     src/crypto/signature.cpp
     src/files/chunker.cpp

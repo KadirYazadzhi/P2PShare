@@ -1,7 +1,8 @@
 #include "files/download_manager.hpp"
 #include "crypto/hasher.hpp"
-#include "crypto/signature.hpp" // Added for Signature verification
+#include "crypto/signature.hpp"
 #include "common/serializer.hpp"
+#include "common/logger.hpp"
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -10,46 +11,40 @@
 #include <sstream>
 #include <iomanip>
 
-// Helper for serializing/deserializing manifest (should be in a common place)
+// Helper for serializing/deserializing manifest
 namespace Serializer {
     std::vector<uint8_t> serialize_manifest(const Manifest& m);
     Manifest deserialize_manifest(const std::vector<uint8_t>& buffer);
 }
 
 DownloadManager::DownloadManager(hash_t root_hash, StorageManager& storage_manager)
-    : state_(ManagerState::IDLE), root_hash_(root_hash), storage_manager_(storage_manager) { // Initialize storage_manager_ and root_hash_
+    : state_(ManagerState::IDLE), root_hash_(root_hash), storage_manager_(storage_manager) {
     
     std::string hex_hash_str = Hasher::hash_to_hex(root_hash_);
     temp_file_path_ = fs::temp_directory_path() / (hex_hash_str + ".tmp");
-    final_file_path_ = fs::current_path() / hex_hash_str; // Default final path
+    final_file_path_ = fs::current_path() / hex_hash_str; 
 
-    std::cout << "DownloadManager created for hash: " << hex_hash_str << std::endl;
-    load_download_state(); // Load existing state from storage
+    LOG_INFO("DownloadManager created for hash: ", hex_hash_str);
+    load_download_state(); 
 }
 
 void DownloadManager::load_download_state() {
     auto dm_state = storage_manager_.get_download_state(root_hash_);
     if (!std::get<0>(dm_state).empty()) {
         final_file_path_ = std::get<0>(dm_state);
-        // progress = std::get<1>(dm_state); // Currently, progress is just a piece_states_ count.
-                                            // Need to enhance storage to save piece_states_ as BLOB.
-                                            // For now, it will restart from scratch, but manifest is loaded.
-        std::cout << "Loaded download state for " << Hasher::hash_to_hex(root_hash_) << " from storage." << std::endl;
-        // Also load manifest if available
+        LOG_INFO("Loaded download state for ", Hasher::hash_to_hex(root_hash_), " from storage.");
         manifest_ = storage_manager_.get_manifest(root_hash_);
         if (manifest_) {
-            piece_states_.assign(manifest_->pieces_count, PieceState::Needed); // Reset pieces states for now
+            piece_states_.assign(manifest_->pieces_count, PieceState::Needed); 
             piece_availability_.assign(manifest_->pieces_count, 0);
-            std::cout << "Manifest loaded from storage." << std::endl;
-            state_ = ManagerState::DOWNLOADING; // Ready to continue download
+            LOG_INFO("Manifest loaded from storage.");
+            state_ = ManagerState::DOWNLOADING; 
         }
     }
 }
 
 void DownloadManager::save_download_state() {
     if (manifest_) {
-        // Here, 'progress' is simplified to piece_states_ size,
-        // but should ideally be the number of 'Have' pieces.
         uint32_t progress = 0;
         for(PieceState ps : piece_states_) {
             if (ps == PieceState::Have) {
@@ -62,12 +57,9 @@ void DownloadManager::save_download_state() {
 
 void DownloadManager::add_peer(std::shared_ptr<Connection> peer_conn) {
     peers_.insert(peer_conn);
-    std::cout << "Peer " << peer_conn->socket().remote_endpoint() << " added to download." << std::endl;
-
+    LOG_INFO("Peer ", peer_conn->socket().remote_endpoint(), " added to download.");
     
-    // If we already have the manifest, request bitfield from new peer
     if (manifest_ && state_ == ManagerState::DOWNLOADING) {
-        // Send QUERY_SEARCH to get bitfield from new peer
         QuerySearchPayload payload;
         payload.root_hash = root_hash_;
 
@@ -82,13 +74,13 @@ void DownloadManager::add_peer(std::shared_ptr<Connection> peer_conn) {
 
 void DownloadManager::start() {
     if (peers_.empty()) {
-        std::cerr << "Cannot start download, no peers available." << std::endl;
+        LOG_WARN("Cannot start download, no peers available.");
         return;
     }
     if (state_ != ManagerState::IDLE && state_ != ManagerState::REQUESTING_MANIFEST) return;
 
     if (!manifest_) {
-        std::cout << "Starting download by requesting manifest..." << std::endl;
+        LOG_INFO("Starting download by requesting manifest...");
         state_ = ManagerState::REQUESTING_MANIFEST;
         
         auto first_peer = *peers_.begin();
@@ -108,6 +100,9 @@ void DownloadManager::start() {
 }
 
 void DownloadManager::handle_message(const Message& msg, std::shared_ptr<Connection> peer_conn) {
+    // Check if peer is banned (should be removed from set, but double check)
+    if (peers_.find(peer_conn) == peers_.end()) return;
+
     switch (msg.type) {
         case MessageType::SEARCH_RESPONSE:
             handle_search_response(msg, peer_conn);
@@ -127,11 +122,7 @@ void DownloadManager::handle_message(const Message& msg, std::shared_ptr<Connect
 }
 
 void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr<Connection> peer_conn) {
-    // If we already have the manifest, this is a response to a bitfield request for a new peer
     if (manifest_ && state_ == ManagerState::DOWNLOADING) {
-        // The server sends BITFIELD right after SEARCH_RESPONSE, so this SEARCH_RESPONSE
-        // for an already known manifest is effectively just a confirmation.
-        // The BITFIELD will be handled by handle_bitfield_response.
         return;
     }
 
@@ -139,7 +130,7 @@ void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr
 
     bool found = msg.payload[0];
     if (!found) {
-        std::cerr << "File not found on peer " << peer_conn->socket().remote_endpoint() << std::endl;
+        LOG_WARN("File not found on peer ", peer_conn->socket().remote_endpoint());
         state_ = ManagerState::FAILED;
         return;
     }
@@ -151,25 +142,22 @@ void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr
     if (!manifest_->signer_pubkey.empty() && !manifest_->signature.empty()) {
         std::vector<uint8_t> root_hash_vec(manifest_->root_hash.begin(), manifest_->root_hash.end());
         if (Signature::verify(root_hash_vec, manifest_->signature, manifest_->signer_pubkey)) {
-            std::cout << "Manifest Signature Verified! Trusted source." << std::endl;
+            LOG_INFO("Manifest Signature Verified! Trusted source.");
         } else {
-            std::cerr << "WARNING: Manifest Signature Verification FAILED!" << std::endl;
-            // Policy: fail download? Or just warn? For safety, let's warn but proceed for now (or fail).
-            // state_ = ManagerState::FAILED;
-            // return;
+            LOG_ERR("WARNING: Manifest Signature Verification FAILED!");
         }
     } else {
-        std::cout << "Manifest is unsigned." << std::endl;
+        LOG_INFO("Manifest is unsigned.");
     }
 
-    std::cout << "Received manifest for: " << manifest_->file_name << std::endl;
+    LOG_INFO("Received manifest for: ", manifest_->file_name);
     final_file_path_ = manifest_->file_name;
 
     std::ofstream(temp_file_path_, std::ios::binary).close();
     fs::resize_file(temp_file_path_, manifest_->file_size);
 
     piece_states_.assign(manifest_->pieces_count, PieceState::Needed);
-    piece_availability_.assign(manifest_->pieces_count, 0); // Initialize piece rarity counts
+    piece_availability_.assign(manifest_->pieces_count, 0);
     state_ = ManagerState::DOWNLOADING;
 }
 
@@ -184,9 +172,8 @@ void DownloadManager::handle_bitfield_response(const Message& msg, std::shared_p
     Bitfield bf(manifest_->pieces_count, field_bytes);
     peer_conn->set_peer_bitfield(root_hash, bf);
 
-    std::cout << "Received bitfield from peer " << peer_conn->socket().remote_endpoint() << std::endl;
+    LOG_INFO("Received bitfield from peer ", peer_conn->socket().remote_endpoint());
 
-    // Update global piece availability
     for (uint32_t i = 0; i < manifest_->pieces_count; ++i) {
         if (bf.has_piece(i)) {
             piece_availability_[i]++;
@@ -205,7 +192,6 @@ void DownloadManager::handle_have_response(const Message& msg, std::shared_ptr<C
 
     if (payload.root_hash != root_hash_) return;
 
-    // Update the peer's bitfield
     auto peer_bitfield_opt = peer_conn->get_peer_bitfield(root_hash_);
     if (peer_bitfield_opt) {
         Bitfield peer_bitfield = *peer_bitfield_opt;
@@ -213,24 +199,21 @@ void DownloadManager::handle_have_response(const Message& msg, std::shared_ptr<C
             peer_bitfield.set_piece(payload.piece_index);
             peer_conn->set_peer_bitfield(root_hash_, peer_bitfield);
 
-            // Update global piece availability
             if (payload.piece_index < piece_availability_.size()) {
                 piece_availability_[payload.piece_index]++;
-                std::cout << "Peer " << peer_conn->socket().remote_endpoint() 
-                          << " now has piece " << payload.piece_index << ". Rarity is now " 
-                          << piece_availability_[payload.piece_index] << std::endl;
+                LOG_DEBUG("Peer ", peer_conn->socket().remote_endpoint(), 
+                          " now has piece ", payload.piece_index, ". Rarity: ", 
+                          piece_availability_[payload.piece_index]);
             }
         }
     }
 
-    // We might be able to request this piece now
     schedule_work();
 }
 
 void DownloadManager::schedule_work() {
     if (state_ != ManagerState::DOWNLOADING) return;
 
-    // Check if download is complete
     bool all_done = true;
     for(PieceState ps : piece_states_) {
         if (ps != PieceState::Have) {
@@ -243,39 +226,54 @@ void DownloadManager::schedule_work() {
         return;
     }
 
-    // Collect needed pieces and sort by rarity
-    std::vector<std::pair<uint32_t, uint32_t>> rarest_pieces; // {piece_index, rarity_count}
+    std::vector<std::pair<uint32_t, uint32_t>> rarest_pieces;
     for (uint32_t i = 0; i < manifest_->pieces_count; ++i) {
         if (piece_states_[i] == PieceState::Needed) {
             rarest_pieces.push_back({i, piece_availability_[i]});
         }
     }
 
-    // Sort by rarity (ascending)
     std::sort(rarest_pieces.begin(), rarest_pieces.end(), 
               [](const auto& a, const auto& b) { return a.second < b.second; });
 
-    // Try to fill request windows for all peers
+    // --- END GAME MODE LOGIC START ---
+    // If remaining needed pieces is small (e.g., < 5) and we have multiple peers,
+    // allow duplicate requests for the same piece.
+    // Simple check: if rarest_pieces.size() is small.
+    bool end_game = (rarest_pieces.size() > 0 && rarest_pieces.size() < 5 && peers_.size() > 1);
+    // ---------------------------------
+
     for (const auto& peer : peers_) {
-        // Check if peer is still connected and has a bitfield
         auto peer_bitfield_opt = peer->get_peer_bitfield(root_hash_);
-        if (!peer_bitfield_opt) continue; // Peer not ready or no bitfield yet
+        if (!peer_bitfield_opt) continue;
 
         Bitfield peer_bitfield = *peer_bitfield_opt;
 
-        // Fill peer's request window
         while (in_flight_requests_[peer].size() < REQUEST_WINDOW_SIZE) {
             bool requested_a_piece = false;
             for (const auto& piece_info : rarest_pieces) {
                 uint32_t piece_index = piece_info.first;
 
-                if (piece_states_[piece_index] == PieceState::Needed && peer_bitfield.has_piece(piece_index)) {
+                bool already_requested = (piece_states_[piece_index] == PieceState::Requested);
+                
+                // In normal mode, skip if already requested.
+                // In end-game mode, skip only if THIS peer already requested it.
+                bool request_allowed = !already_requested;
+                
+                if (end_game && already_requested) {
+                    // Check if THIS peer already requested it
+                    if (in_flight_requests_[peer].count(piece_index) == 0) {
+                        request_allowed = true;
+                    }
+                }
+
+                if (request_allowed && peer_bitfield.has_piece(piece_index)) {
                     request_piece_from_peer(piece_index, peer);
                     requested_a_piece = true;
-                    break; // Move to next peer or next slot in window
+                    break; 
                 }
             }
-            if (!requested_a_piece) break; // No more pieces to request from this peer
+            if (!requested_a_piece) break;
         }
     }
 }
@@ -293,7 +291,7 @@ void DownloadManager::request_piece_from_peer(uint32_t piece_index, std::shared_
     msg.payload.resize(sizeof(payload));
     std::memcpy(msg.payload.data(), &payload, sizeof(payload));
 
-    std::cout << "Requesting piece " << piece_index << " from " << peer_conn->socket().remote_endpoint() << std::endl;
+    LOG_DEBUG("Requesting piece ", piece_index, " from ", peer_conn->socket().remote_endpoint());
     peer_conn->send_message(msg);
 }
 
@@ -303,11 +301,11 @@ void DownloadManager::handle_piece_response(const Message& msg, std::shared_ptr<
     uint32_t piece_index;
     std::memcpy(&piece_index, msg.payload.data() + HASH_SIZE, sizeof(uint32_t));
 
-    // Remove from in-flight requests
     in_flight_requests_[peer_conn].erase(piece_index);
 
-    if (piece_states_[piece_index] != PieceState::Requested) {
-        std::cout << "Received unexpected piece " << piece_index << " (not requested or already have)." << std::endl;
+    // In end-game mode, we might receive a piece we already have.
+    if (piece_states_[piece_index] == PieceState::Have) {
+        LOG_DEBUG("Received piece ", piece_index, " which we already have. Ignoring.");
         return;
     }
 
@@ -315,21 +313,26 @@ void DownloadManager::handle_piece_response(const Message& msg, std::shared_ptr<
 
     if (verify_and_write_piece(piece_index, piece_data)) {
         piece_states_[piece_index] = PieceState::Have;
-        std::cout << "Piece " << piece_index << " downloaded and verified." << std::endl;
-        save_download_state(); // Save state after successful piece download
+        LOG_INFO("Piece ", piece_index, " downloaded and verified.");
+        save_download_state();
         
-        // Notify all peers that we now have this piece
         for (const auto& peer : peers_) {
-            if (peer != peer_conn) { // Don't notify the peer we got it from
+            if (peer != peer_conn) { 
                 peer->send_have(root_hash_, piece_index);
             }
         }
-
         schedule_work();
     } else {
-        std::cerr << "Piece " << piece_index << " failed verification." << std::endl;
-        piece_states_[piece_index] = PieceState::Needed; // Mark as needed again
-        schedule_work();
+        LOG_ERR("Piece ", piece_index, " failed verification from peer ", peer_conn->socket().remote_endpoint());
+        piece_states_[piece_index] = PieceState::Needed; 
+        
+        // --- STRIKE SYSTEM ---
+        peer_strikes_[peer_conn]++;
+        if (peer_strikes_[peer_conn] >= MAX_STRIKES) {
+            ban_peer(peer_conn);
+        } else {
+            schedule_work();
+        }
     }
 }
 
@@ -350,23 +353,40 @@ bool DownloadManager::verify_and_write_piece(uint32_t piece_index, const std::ve
 void DownloadManager::finalize_download() {
     if (state_ == ManagerState::COMPLETED) return;
     state_ = ManagerState::COMPLETED;
-    save_download_state(); // Save state after download completion
-    std::cout << "Download complete! Assembling file." << std::endl;
+    save_download_state(); 
+    LOG_INFO("Download complete! Assembling file.");
     
     std::error_code ec;
     fs::rename(temp_file_path_, final_file_path_, ec);
 
     if (ec) {
-        std::cerr << "Failed to rename file: " << ec.message() << ". Attempting copy and delete." << std::endl;
+        LOG_ERR("Failed to rename file: ", ec.message(), ". Attempting copy and delete.");
         try {
             fs::copy(temp_file_path_, final_file_path_, fs::copy_options::overwrite_existing);
             fs::remove(temp_file_path_);
-            std::cout << "File copied and temporary file deleted." << std::endl;
+            LOG_INFO("File copied and temporary file deleted.");
         } catch (const fs::filesystem_error& e) {
-            std::cerr << "Error during copy/delete fallback: " << e.what() << std::endl;
+            LOG_ERR("Error during copy/delete fallback: ", e.what());
             state_ = ManagerState::FAILED;
             return;
         }
     }
-    std::cout << "File saved as: " << final_file_path_ << std::endl;
+    LOG_INFO("File saved as: ", final_file_path_);
+}
+
+void DownloadManager::ban_peer(std::shared_ptr<Connection> peer_conn) {
+    LOG_WARN("Banning peer ", peer_conn->socket().remote_endpoint(), " due to repeated bad pieces.");
+    peers_.erase(peer_conn);
+    in_flight_requests_.erase(peer_conn);
+    peer_strikes_.erase(peer_conn);
+    
+    // Ideally we should disconnect, but Connection manages its own lifecycle mostly.
+    // We can force close the socket.
+    try {
+        if(peer_conn->socket().is_open()) {
+            peer_conn->socket().close();
+        }
+    } catch(...) {}
+    
+    schedule_work();
 }

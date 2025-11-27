@@ -13,6 +13,7 @@
 #include "storage/storage_manager.hpp"
 #include "files/file_sharer.hpp"
 #include "cli/cli.hpp"
+#include "common/logger.hpp" // Added
 
 void print_usage() {
     std::cout << "Usage: p2pshare <mode> [options]\n"
@@ -24,10 +25,14 @@ void print_usage() {
 
 // Keep test handler for handshake_test
 void client_message_handler(const Message& msg, std::shared_ptr<Connection> conn) {
-     std::cout << "Test Client received msg type: " << static_cast<int>(msg.type) << std::endl;
+     LOG_INFO("Test Client received msg type: ", static_cast<int>(msg.type));
 }
 
 int main(int argc, char* argv[]) {
+    // Initialize Logger
+    Logger::instance().init("p2p_node.log");
+    LOG_INFO("Starting P2PShare Node...");
+
     std::string mode = "interactive";
     if (argc > 1) {
         mode = argv[1];

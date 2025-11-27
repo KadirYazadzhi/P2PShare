@@ -26,6 +26,7 @@ private:
     void cmd_share(const std::vector<std::string>& args);
     void cmd_download(const std::vector<std::string>& args);
     void cmd_connect(const std::vector<std::string>& args);
+    void cmd_punch(const std::vector<std::string>& args);
     void cmd_peers(const std::vector<std::string>& args);
     void cmd_status(const std::vector<std::string>& args);
     

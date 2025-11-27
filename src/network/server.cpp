@@ -3,6 +3,7 @@
 #include "files/bitfield.hpp"
 #include "common/serializer.hpp"
 #include "dht/dht_node.hpp"
+#include "common/logger.hpp" // Added
 #include <iostream>
 #include <iomanip>
 
@@ -21,14 +22,23 @@ Server::Server(asio::io_context& io_context, uint16_t port, StorageManager& stor
         pubkey_[i] = static_cast<uint8_t>(std::rand() % 256);
     }
     init_ssl_context();
-    std::cout << "Server listening on TCP port " << port << " and UDP port " << port << " (DHT)" << std::endl;
+    LOG_INFO("Server listening on TCP port ", port, " and UDP port ", port, " (DHT)");
     
     // Resume active downloads
     auto pending_downloads = storage_manager_.get_all_downloads();
-    std::cout << "Resuming " << pending_downloads.size() << " active downloads..." << std::endl;
+    LOG_INFO("Resuming ", pending_downloads.size(), " active downloads...");
     for (const auto& [root_hash, path] : pending_downloads) {
         start_download(root_hash);
     }
+
+    // Hook up Hole Punching Callback
+    dht_node_.set_on_hole_punch_request([this](const asio::ip::udp::endpoint& target) {
+        LOG_INFO("Received Hole Punch Request via DHT. Attempting TCP connect to: ", target);
+        // Important: Connect to the TCP port. 
+        // Assuming the other peer is listening on the same port number for TCP as they announced for UDP (common practice here).
+        // Or better, rely on the payload providing the correct port.
+        connect(target.address().to_string(), target.port());
+    });
 
     dht_node_.start(); // Start DHT
     start_accept();
@@ -50,7 +60,7 @@ void Server::init_ssl_context() {
         ssl_context_.use_certificate_chain_file("server.crt");
         ssl_context_.use_private_key_file("server.key", asio::ssl::context::file_format::pem);
     } catch (const asio::system_error& e) {
-        std::cerr << "Error initializing SSL context: " << e.what() << std::endl;
+        LOG_ERR("Error initializing SSL context: ", e.what());
     }
 }
 
@@ -66,7 +76,7 @@ void Server::start_accept() {
     acceptor_.async_accept(new_connection->socket(),
         [this, new_connection](const asio::error_code& error) {
             if (!error) {
-                std::cout << "New connection accepted from " << new_connection->socket().remote_endpoint() << std::endl;
+                LOG_INFO("New connection accepted from ", new_connection->socket().remote_endpoint());
                 connections_.insert(new_connection);
                 
                 // Notify active downloads
@@ -76,7 +86,7 @@ void Server::start_accept() {
 
                 new_connection->start(asio::ssl::stream_base::server);
             } else {
-                std::cerr << "Error accepting connection: " << error.message() << std::endl;
+                LOG_ERR("Error accepting connection: ", error.message());
             }
             start_accept();
         });
@@ -96,7 +106,7 @@ void Server::connect(const std::string& host, uint16_t port) {
     new_connection->socket().async_connect(endpoint,
         [this, new_connection, endpoint](const asio::error_code& error) {
             if (!error) {
-                std::cout << "Connected to " << endpoint << std::endl;
+                LOG_INFO("Connected to ", endpoint);
                 connections_.insert(new_connection);
                 
                 // Notify active downloads
@@ -116,12 +126,41 @@ void Server::connect(const std::string& host, uint16_t port) {
                      msg.type = MessageType::HANDSHAKE;
                      msg.payload = Serializer::serialize_handshake_payload(hs);
                      new_connection->send_message(msg);
-                     std::cout << "Sent HANDSHAKE to " << new_connection->socket().remote_endpoint() << std::endl;
+                     LOG_INFO("Sent HANDSHAKE to ", new_connection->socket().remote_endpoint());
                 });
             } else {
-                std::cerr << "Error connecting to " << endpoint << ": " << error.message() << std::endl;
+                LOG_ERR("Error connecting to ", endpoint, ": ", error.message());
             }
         });
+}
+
+void Server::connect_with_hole_punch(const std::string& host, uint16_t port) {
+    LOG_INFO("Initiating TCP Hole Punch to ", host, ":", port);
+    
+    // 1. Send UDP Signaling Packet via DHT
+    asio::ip::udp::endpoint target_ep(asio::ip::make_address(host), port);
+    
+    // We need our external endpoint. 
+    std::string my_ip = dht_node_.get_external_ip();
+    uint16_t my_port = dht_node_.get_external_port();
+    if (my_ip.empty()) { 
+        my_ip = "0.0.0.0"; // Fallback, though hole punch likely won't work without STUN
+    }
+    asio::ip::udp::endpoint my_ep(asio::ip::make_address(my_ip), my_port);
+
+    dht_node_.send_hole_punch_request(target_ep, my_ep);
+
+    // 2. Wait a tiny bit to ensure packet leaves (optional, but helps sync)
+    // Using a timer here would be better async design, but for simplicity we'll just schedule the connect.
+    
+    auto timer = std::make_shared<asio::steady_timer>(io_context_);
+    timer->expires_after(std::chrono::milliseconds(100));
+    timer->async_wait([this, host, port, timer](const asio::error_code& error){
+        if (!error) {
+             LOG_INFO("Hole Punch: Executing Simultaneous TCP Connect to ", host, ":", port);
+             connect(host, port);
+        }
+    });
 }
 
 void Server::start_download(const hash_t& root_hash) {

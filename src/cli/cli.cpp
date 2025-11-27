@@ -64,6 +64,7 @@ void CLI::print_help() {
               << "  share <file_path>       - Share a file\n"
               << "  download <file_id>      - Download a file by ID\n"
               << "  connect <host> <port>   - Connect to a peer (TCP)\n"
+              << "  punch <host> <port>     - Advanced: Try TCP Hole Punching connect\n"
               << "  peers                   - List connected peers\n"
               << "  status                  - Show active downloads/shares\n"
               << "  dht_bootstrap <ip> <port> - Bootstrap DHT node\n"
@@ -88,6 +89,7 @@ void CLI::handle_command(const std::string& line) {
     if (cmd == "share") cmd_share(args);
     else if (cmd == "download") cmd_download(args);
     else if (cmd == "connect") cmd_connect(args);
+    else if (cmd == "punch") cmd_punch(args);
     else if (cmd == "peers") cmd_peers(args);
     else if (cmd == "status") cmd_status(args);
     else if (cmd == "dht_bootstrap") cmd_dht_bootstrap(args);
@@ -258,6 +260,21 @@ void CLI::cmd_connect(const std::vector<std::string>& args) {
         port = static_cast<uint16_t>(std::stoi(args[1]));
         server_.connect(host, port);
         std::cout << "Initiating connection to " << host << ":" << port << "..." << std::endl;
+    } catch (const std::exception& e) {
+        std::cout << "Invalid port or error: " << e.what() << std::endl;
+    }
+}
+
+void CLI::cmd_punch(const std::vector<std::string>& args) {
+    if (args.size() < 2) {
+        std::cout << "Usage: punch <host> <port> (Try TCP Hole Punch)" << std::endl;
+        return;
+    }
+    std::string host = args[0];
+    uint16_t port = 0;
+    try {
+        port = static_cast<uint16_t>(std::stoi(args[1]));
+        server_.connect_with_hole_punch(host, port);
     } catch (const std::exception& e) {
         std::cout << "Invalid port or error: " << e.what() << std::endl;
     }

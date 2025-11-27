@@ -277,11 +277,17 @@ void DhtNode::handle_message(const std::vector<uint8_t>& data, const asio::ip::u
             std::vector<uint8_t> payload_data(data.begin() + sizeof(MessageType), data.end());
             HolePunchRequestPayload payload = Serializer::deserialize_hole_punch_request_payload(payload_data);
 
-            // Immediately send a HOLE_PUNCH_RESPONSE back to the sender's actual UDP endpoint
-            // The payload will contain THIS node's external IP/port
+            // Immediately send a HOLE_PUNCH_RESPONSE back
             asio::ip::udp::endpoint self_external_endpoint(asio::ip::make_address(external_ip_), external_port_);
             send_hole_punch_response(sender, self_external_endpoint);
             std::cout << "Received HOLE_PUNCH_REQUEST from " << sender << ". Sent HOLE_PUNCH_RESPONSE." << std::endl;
+            
+            // Notify Server to start TCP connection attempt (The "Reverse" connection)
+            // We use the payload's external IP/Port because that's what the peer sees as their public address
+            asio::ip::udp::endpoint target_ep(asio::ip::address_v4(payload.sender_external_ip), payload.sender_external_port);
+            if (on_hole_punch_request_) {
+                on_hole_punch_request_(target_ep);
+            }
             break;
         }
         case MessageType::HOLE_PUNCH_RESPONSE: {
