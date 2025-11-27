@@ -80,7 +80,10 @@ private:
 
     fs::path temp_file_path_;
     fs::path final_file_path_;
-    StorageManager& storage_manager_; // Added StorageManager reference
+    StorageManager& storage_manager_; 
+
+public:
+    const fs::path& get_final_file_path() const { return final_file_path_; }
 };
 
 #endif //P2P_DOWNLOAD_MANAGER_HPP

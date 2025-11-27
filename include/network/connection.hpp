@@ -46,8 +46,11 @@ public:
         message_handler_ = std::move(handler);
     }
 
-    ssl_socket::lowest_layer_type& socket() { // Return lowest_layer_type for raw socket access
+    virtual ssl_socket::lowest_layer_type& socket() { 
         return socket_.lowest_layer();
+    }
+    virtual asio::ip::tcp::endpoint get_remote_endpoint() const {
+        return socket_.lowest_layer().remote_endpoint();
     }
 
     asio::io_context& get_io_context() { // Public accessor for io_context_
@@ -70,7 +73,7 @@ public:
             });
     }
 
-    void send_message(const Message& msg) {
+    virtual void send_message(const Message& msg) {
         asio::post(io_context_,
                    [self = shared_from_this(), msg]() {
                        bool write_in_progress = !self->write_msgs_.empty();
@@ -82,11 +85,11 @@ public:
     }
 
     // Bitfield management
-    void set_peer_bitfield(const hash_t& root_hash, const Bitfield& bitfield) {
+    virtual void set_peer_bitfield(const hash_t& root_hash, const Bitfield& bitfield) {
         peer_bitfields_[root_hash] = bitfield;
     }
 
-    std::optional<Bitfield> get_peer_bitfield(const hash_t& root_hash) {
+    virtual std::optional<Bitfield> get_peer_bitfield(const hash_t& root_hash) {
         auto it = peer_bitfields_.find(root_hash);
         if (it != peer_bitfields_.end()) {
             return it->second;
@@ -94,7 +97,7 @@ public:
         return std::nullopt;
     }
 
-    void send_have(const hash_t& root_hash, uint32_t piece_index) {
+    virtual void send_have(const hash_t& root_hash, uint32_t piece_index) {
         Message have_msg;
         have_msg.type = MessageType::HAVE;
         have_msg.payload = Serializer::serialize_have_payload(root_hash, piece_index);
@@ -102,10 +105,10 @@ public:
     }
 
     // Choking / Unchoking
-    bool is_am_choking() const { return am_choking_; }
-    bool is_peer_choking() const { return peer_choking_; }
+    virtual bool is_am_choking() const { return am_choking_; }
+    virtual bool is_peer_choking() const { return peer_choking_; }
 
-    void choke_peer() {
+    virtual void choke_peer() {
         if (am_choking_) return;
         am_choking_ = true;
         Message msg;
@@ -113,7 +116,7 @@ public:
         send_message(msg);
     }
 
-    void unchoke_peer() {
+    virtual void unchoke_peer() {
         if (!am_choking_) return;
         am_choking_ = false;
         Message msg;
@@ -121,12 +124,12 @@ public:
         send_message(msg);
     }
     
-    void set_peer_choking(bool choking) {
+    virtual void set_peer_choking(bool choking) {
         peer_choking_ = choking;
     }
 
     // Speed Measurement
-    double get_download_speed() const { return download_speed_; }
+    virtual double get_download_speed() const { return download_speed_; }
     
     void update_download_speed(size_t bytes, double seconds) {
         // Simple moving average or just immediate rate
