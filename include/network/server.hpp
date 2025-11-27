@@ -10,14 +10,27 @@
 
 #include "connection.hpp"
 #include "protocol.hpp"
+#include "../files/download_manager.hpp"
+#include "../storage/storage_manager.hpp"
+#include "../dht/dht_node.hpp"
+#include <map>
 
 class Server {
 public:
-    Server(asio::io_context& io_context, uint16_t port);
+    Server(asio::io_context& io_context, uint16_t port, StorageManager& storage_manager);
+
+    void start_download(const hash_t& root_hash); // Removed explicit StorageManager arg as we now have it as member
+    std::vector<std::shared_ptr<DownloadManager>> get_active_downloads() const;
+    
+    // Connect to a peer
+    void connect(const std::string& host, uint16_t port);
+
+    // Access DHT
+    dht::DhtNode& get_dht_node() { return dht_node_; }
 
 private:
     void start_accept();
-    void handle_accept(std::shared_ptr<Connection> new_connection, const asio::error_code& error); // Added handle_accept
+    void handle_accept(std::shared_ptr<Connection> new_connection, const asio::error_code& error);
     void handle_message(Message msg, std::shared_ptr<Connection> connection);
 
     // Specific message handlers
@@ -33,6 +46,10 @@ private:
     std::set<std::shared_ptr<Connection>> connections_; // To keep connections alive
     dht::NodeID peer_id_;
     std::array<uint8_t, PUBKEY_SIZE> pubkey_;
+    
+    std::map<hash_t, std::shared_ptr<DownloadManager>> active_downloads_;
+    
+    StorageManager& storage_manager_;
+    dht::DhtNode dht_node_;
 };
-
 #endif //P2P_SERVER_HPP

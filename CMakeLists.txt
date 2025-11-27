@@ -17,10 +17,12 @@ include_directories(third_party/json/include)
 # Gather all source files
 set(SOURCES
     src/common/serializer.cpp
+    src/common/rate_limiter.cpp
     src/crypto/hasher.cpp
     src/files/chunker.cpp
     src/files/download_manager.cpp
     src/files/file_sharer.cpp
+    src/cli/cli.cpp
     src/main.cpp
     src/network/client.cpp
     src/network/server.cpp
