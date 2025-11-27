@@ -27,6 +27,15 @@ enum class MessageType : uint8_t {
     PIECE = 5,
     BITFIELD = 6,
     HAVE = 7,
+    CHOKE = 8,
+    UNCHOKE = 9,
+
+    // Relay Messages
+    RELAY_REGISTER = 40,          // Ask relay for a Session ID
+    RELAY_REGISTER_RESPONSE = 41, // Relay replies with Session ID
+    RELAY_CONNECT = 42,           // Peer B connects to Relay with Session ID
+    RELAY_DATA = 43,              // Wraps actual P2P message
+    RELAY_ERROR = 44,
 
     // DHT (UDP) messages
     DHT_PING = 10,
@@ -66,6 +75,14 @@ struct RequestPiecePayload {
 struct HavePayload {
     hash_t root_hash;
     uint32_t piece_index;
+};
+
+struct RelayRegisterResponsePayload {
+    uint32_t session_id;
+};
+
+struct RelayConnectPayload {
+    uint32_t session_id;
 };
 
 // NAT Traversal Payloads (UDP)

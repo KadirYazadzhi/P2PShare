@@ -65,6 +65,8 @@ void CLI::print_help() {
               << "  download <file_id>      - Download a file by ID\n"
               << "  connect <host> <port>   - Connect to a peer (TCP)\n"
               << "  punch <host> <port>     - Advanced: Try TCP Hole Punching connect\n"
+              << "  register_relay <host> <port> - Register session on relay\n"
+              << "  connect_relay <host> <port> <sid> - Connect to peer via relay session\n"
               << "  peers                   - List connected peers\n"
               << "  status                  - Show active downloads/shares\n"
               << "  dht_bootstrap <ip> <port> - Bootstrap DHT node\n"
@@ -90,6 +92,8 @@ void CLI::handle_command(const std::string& line) {
     else if (cmd == "download") cmd_download(args);
     else if (cmd == "connect") cmd_connect(args);
     else if (cmd == "punch") cmd_punch(args);
+    else if (cmd == "register_relay") cmd_register_relay(args);
+    else if (cmd == "connect_relay") cmd_connect_relay(args);
     else if (cmd == "peers") cmd_peers(args);
     else if (cmd == "status") cmd_status(args);
     else if (cmd == "dht_bootstrap") cmd_dht_bootstrap(args);
@@ -277,6 +281,36 @@ void CLI::cmd_punch(const std::vector<std::string>& args) {
         server_.connect_with_hole_punch(host, port);
     } catch (const std::exception& e) {
         std::cout << "Invalid port or error: " << e.what() << std::endl;
+    }
+}
+
+void CLI::cmd_register_relay(const std::vector<std::string>& args) {
+    if (args.size() < 2) {
+        std::cout << "Usage: register_relay <host> <port>" << std::endl;
+        return;
+    }
+    try {
+        std::string host = args[0];
+        uint16_t port = std::stoi(args[1]);
+        server_.register_on_relay(host, port);
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << std::endl;
+    }
+}
+
+void CLI::cmd_connect_relay(const std::vector<std::string>& args) {
+    if (args.size() < 3) {
+        std::cout << "Usage: connect_relay <host> <port> <session_id>" << std::endl;
+        return;
+    }
+    try {
+        std::string host = args[0];
+        uint16_t port = std::stoi(args[1]);
+        uint32_t sid = std::stoi(args[2]);
+        server_.connect_via_relay(host, port, sid);
+        std::cout << "Initiating relay connection..." << std::endl;
+    } catch (const std::exception& e) {
+        std::cout << "Error: " << e.what() << std::endl;
     }
 }
 

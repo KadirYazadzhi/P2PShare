@@ -460,6 +460,32 @@ std::tuple<hash_t, Bitfield> deserialize_bitfield_payload(const std::vector<uint
     return {root_hash, bitfield};
 }
 
+std::vector<uint8_t> serialize_relay_register_response(uint32_t session_id) {
+    std::vector<uint8_t> buffer(sizeof(uint32_t));
+    std::memcpy(buffer.data(), &session_id, sizeof(uint32_t));
+    return buffer;
+}
+
+uint32_t deserialize_relay_register_response(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() < sizeof(uint32_t)) return 0;
+    uint32_t session_id;
+    std::memcpy(&session_id, buffer.data(), sizeof(uint32_t));
+    return session_id;
+}
+
+std::vector<uint8_t> serialize_relay_connect(uint32_t session_id) {
+    std::vector<uint8_t> buffer(sizeof(uint32_t));
+    std::memcpy(buffer.data(), &session_id, sizeof(uint32_t));
+    return buffer;
+}
+
+uint32_t deserialize_relay_connect(const std::vector<uint8_t>& buffer) {
+    if (buffer.size() < sizeof(uint32_t)) return 0;
+    uint32_t session_id;
+    std::memcpy(&session_id, buffer.data(), sizeof(uint32_t));
+    return session_id;
+}
+
 std::vector<uint8_t> serialize_hole_punch_request_payload(const HolePunchRequestPayload& p) {
     std::vector<uint8_t> buffer(sizeof(HolePunchRequestPayload));
     std::memcpy(buffer.data(), &p, sizeof(HolePunchRequestPayload));

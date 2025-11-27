@@ -36,7 +36,11 @@ public:
                std::shared_ptr<RateLimiter> download_limiter)
         : io_context_(io_context), socket_(io_context, ssl_context),
           upload_rate_limiter_(upload_limiter), 
-          download_rate_limiter_(download_limiter) {} 
+          download_rate_limiter_(download_limiter),
+          am_choking_(true), // Default choked
+          peer_choking_(true),
+          download_speed_(0.0),
+          last_speed_update_(std::chrono::steady_clock::now()) {} 
 
     void set_message_handler(message_handler handler) {
         message_handler_ = std::move(handler);
@@ -97,6 +101,41 @@ public:
         send_message(have_msg);
     }
 
+    // Choking / Unchoking
+    bool is_am_choking() const { return am_choking_; }
+    bool is_peer_choking() const { return peer_choking_; }
+
+    void choke_peer() {
+        if (am_choking_) return;
+        am_choking_ = true;
+        Message msg;
+        msg.type = MessageType::CHOKE;
+        send_message(msg);
+    }
+
+    void unchoke_peer() {
+        if (!am_choking_) return;
+        am_choking_ = false;
+        Message msg;
+        msg.type = MessageType::UNCHOKE;
+        send_message(msg);
+    }
+    
+    void set_peer_choking(bool choking) {
+        peer_choking_ = choking;
+    }
+
+    // Speed Measurement
+    double get_download_speed() const { return download_speed_; }
+    
+    void update_download_speed(size_t bytes, double seconds) {
+        // Simple moving average or just immediate rate
+        if (seconds > 0) {
+            double current_rate = bytes / seconds;
+            // Use an exponential moving average for smoothness
+            download_speed_ = (download_speed_ * 0.7) + (current_rate * 0.3);
+        }
+    }
 
 private:
     void read_header() {
@@ -124,6 +163,17 @@ private:
             [self = shared_from_this()](const asio::error_code& error, size_t bytes_transferred) {
                 if (!error) {
                     self->download_rate_limiter_->try_consume(bytes_transferred); // Track downloaded bytes
+                    
+                    // Update speed stats
+                    self->bytes_since_last_update_ += bytes_transferred;
+                    auto now = std::chrono::steady_clock::now();
+                    std::chrono::duration<double> elapsed = now - self->last_speed_update_;
+                    if (elapsed.count() >= 1.0) { // Update every second
+                        self->update_download_speed(self->bytes_since_last_update_, elapsed.count());
+                        self->bytes_since_last_update_ = 0;
+                        self->last_speed_update_ = now;
+                    }
+
                     if (self->message_handler_) {
                         self->message_handler_(self->read_msg_);
                     }
@@ -219,6 +269,12 @@ private:
 
     std::shared_ptr<RateLimiter> upload_rate_limiter_;
     std::shared_ptr<RateLimiter> download_rate_limiter_;
+    
+    bool am_choking_;
+    bool peer_choking_;
+    double download_speed_; // Bytes per second
+    std::chrono::steady_clock::time_point last_speed_update_;
+    size_t bytes_since_last_update_ = 0;
 
 public: // Public methods for rate limiting
     void set_upload_rate_limit(size_t bytes_per_sec) { upload_rate_limiter_->set_max_rate(bytes_per_sec); }

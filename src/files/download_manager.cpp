@@ -244,6 +244,8 @@ void DownloadManager::schedule_work() {
     // ---------------------------------
 
     for (const auto& peer : peers_) {
+        if (peer->is_peer_choking()) continue; // Skip choked peers
+
         auto peer_bitfield_opt = peer->get_peer_bitfield(root_hash_);
         if (!peer_bitfield_opt) continue;
 

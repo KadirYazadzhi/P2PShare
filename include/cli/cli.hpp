@@ -28,6 +28,8 @@ private:
     void cmd_connect(const std::vector<std::string>& args);
     void cmd_punch(const std::vector<std::string>& args);
     void cmd_peers(const std::vector<std::string>& args);
+    void cmd_register_relay(const std::vector<std::string>& args);
+    void cmd_connect_relay(const std::vector<std::string>& args);
     void cmd_status(const std::vector<std::string>& args);
     
     // DHT Commands

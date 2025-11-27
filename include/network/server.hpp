@@ -27,6 +27,12 @@ public:
     
     // Advanced NAT Traversal
     void connect_with_hole_punch(const std::string& host, uint16_t port);
+    
+    // Relay methods
+    void start_relay_session(std::shared_ptr<Connection> initiator);
+    void join_relay_session(std::shared_ptr<Connection> peer, uint32_t session_id);
+    void connect_via_relay(const std::string& relay_host, uint16_t relay_port, uint32_t session_id);
+    void register_on_relay(const std::string& relay_host, uint16_t relay_port);
 
     // Access DHT
     dht::DhtNode& get_dht_node() { return dht_node_; }
@@ -44,6 +50,11 @@ private:
     void handle_handshake(const Message& msg, std::shared_ptr<Connection> connection);
     void handle_query_search(const Message& msg, std::shared_ptr<Connection> connection);
     void handle_request_piece(const Message& msg, std::shared_ptr<Connection> connection);
+    
+    // Relay handlers
+    void handle_relay_register(std::shared_ptr<Connection> connection);
+    void handle_relay_connect(const Message& msg, std::shared_ptr<Connection> connection);
+    void handle_relay_data(const Message& msg, std::shared_ptr<Connection> connection);
 
     void init_ssl_context(); // Helper to initialize SSL context
 
@@ -61,5 +72,19 @@ private:
     
     std::shared_ptr<RateLimiter> global_upload_limiter_;
     std::shared_ptr<RateLimiter> global_download_limiter_;
+
+    asio::steady_timer unchoke_timer_;
+    std::shared_ptr<Connection> optimistic_unchoke_peer_;
+    void recalculate_unchoked_peers();
+    void schedule_unchoke_round();
+    
+    // Relay State
+    struct RelaySession {
+        std::shared_ptr<Connection> initiator;
+        std::shared_ptr<Connection> peer;
+    };
+    std::map<uint32_t, RelaySession> relay_sessions_;
+    std::map<std::shared_ptr<Connection>, uint32_t> conn_to_session_id_;
+    uint32_t next_session_id_ = 1000;
 };
 #endif //P2P_SERVER_HPP

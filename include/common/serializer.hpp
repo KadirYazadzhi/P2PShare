@@ -144,6 +144,13 @@ std::vector<uint8_t> serialize_bitfield_payload(const hash_t& root_hash, const B
  */
 std::tuple<hash_t, Bitfield> deserialize_bitfield_payload(const std::vector<uint8_t>& buffer);
 
+// Relay Serializers
+std::vector<uint8_t> serialize_relay_register_response(uint32_t session_id);
+uint32_t deserialize_relay_register_response(const std::vector<uint8_t>& buffer);
+
+std::vector<uint8_t> serialize_relay_connect(uint32_t session_id);
+uint32_t deserialize_relay_connect(const std::vector<uint8_t>& buffer);
+
 /**
  * @brief Serializes a HolePunchRequestPayload object into a byte vector.
  */
