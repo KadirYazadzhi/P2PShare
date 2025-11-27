@@ -31,10 +31,12 @@ public:
     using ssl_socket = asio::ssl::stream<asio::ip::tcp::socket>; // Changed from tcp_socket
     using message_handler = std::function<void(Message)>;
 
-    Connection(asio::io_context& io_context, asio::ssl::context& ssl_context) // Modified constructor
+    Connection(asio::io_context& io_context, asio::ssl::context& ssl_context, 
+               std::shared_ptr<RateLimiter> upload_limiter, 
+               std::shared_ptr<RateLimiter> download_limiter)
         : io_context_(io_context), socket_(io_context, ssl_context),
-          upload_rate_limiter_(1024 * 1024), /* 1MB/s default */
-          download_rate_limiter_(1024 * 1024) /* 1MB/s default */ {} // Initialized ssl_socket
+          upload_rate_limiter_(upload_limiter), 
+          download_rate_limiter_(download_limiter) {} 
 
     void set_message_handler(message_handler handler) {
         message_handler_ = std::move(handler);
@@ -121,7 +123,7 @@ private:
         asio::async_read(socket_, asio::buffer(read_msg_.payload), // Use ssl_socket
             [self = shared_from_this()](const asio::error_code& error, size_t bytes_transferred) {
                 if (!error) {
-                    self->download_rate_limiter_.try_consume(bytes_transferred); // Track downloaded bytes
+                    self->download_rate_limiter_->try_consume(bytes_transferred); // Track downloaded bytes
                     if (self->message_handler_) {
                         self->message_handler_(self->read_msg_);
                     }
@@ -143,7 +145,7 @@ private:
             write_header_buffer_[sizeof(uint32_t)] = static_cast<uint8_t>(msg.type);
 
             // Check if we can immediately send this message
-            if (upload_rate_limiter_.try_consume(HEADER_SIZE + msg.payload.size())) {
+            if (upload_rate_limiter_->try_consume(HEADER_SIZE + msg.payload.size())) {
                 do_write_header();
             } else {
                 // If not, schedule a retry
@@ -176,7 +178,7 @@ private:
                         self->write_msgs_.pop_front();
                         if (!self->write_msgs_.empty()) {
                             // Check if next message can be sent immediately
-                            if (self->upload_rate_limiter_.try_consume(HEADER_SIZE + self->write_msgs_.front().payload.size())) {
+                            if (self->upload_rate_limiter_->try_consume(HEADER_SIZE + self->write_msgs_.front().payload.size())) {
                                 self->do_write_header();
                             } else {
                                 self->schedule_write_retry();
@@ -215,14 +217,14 @@ private:
     // State for the remote peer
     std::map<hash_t, Bitfield> peer_bitfields_;
 
-    RateLimiter upload_rate_limiter_;
-    RateLimiter download_rate_limiter_;
+    std::shared_ptr<RateLimiter> upload_rate_limiter_;
+    std::shared_ptr<RateLimiter> download_rate_limiter_;
 
 public: // Public methods for rate limiting
-    void set_upload_rate_limit(size_t bytes_per_sec) { upload_rate_limiter_.set_max_rate(bytes_per_sec); }
-    size_t get_upload_rate_limit() const { return upload_rate_limiter_.get_max_rate(); }
-    void set_download_rate_limit(size_t bytes_per_sec) { download_rate_limiter_.set_max_rate(bytes_per_sec); }
-    size_t get_download_rate_limit() const { return download_rate_limiter_.get_max_rate(); }
+    void set_upload_rate_limit(size_t bytes_per_sec) { upload_rate_limiter_->set_max_rate(bytes_per_sec); }
+    size_t get_upload_rate_limit() const { return upload_rate_limiter_->get_max_rate(); }
+    void set_download_rate_limit(size_t bytes_per_sec) { download_rate_limiter_->set_max_rate(bytes_per_sec); }
+    size_t get_download_rate_limit() const { return download_rate_limiter_->get_max_rate(); }
 };
 
 #endif //P2P_CONNECTION_HPP

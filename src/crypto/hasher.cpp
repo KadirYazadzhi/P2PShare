@@ -1,6 +1,8 @@
 #include "crypto/hasher.hpp"
 #include <openssl/sha.h>
 #include <stdexcept>
+#include <sstream>
+#include <iomanip>
 
 namespace Hasher {
 
@@ -34,8 +36,6 @@ hash_t sha256(const std::string& data) {
     return hash;
 }
 
-} // namespace Hasher
-
 hash_t hex_to_hash(const std::string& hex_str) {
     hash_t hash;
     for (size_t i = 0; i < HASH_SIZE; ++i) {
@@ -43,3 +43,13 @@ hash_t hex_to_hash(const std::string& hex_str) {
     }
     return hash;
 }
+
+std::string hash_to_hex(const hash_t& hash) {
+    std::stringstream ss;
+    for (uint8_t byte : hash) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
+    }
+    return ss.str();
+}
+
+} // namespace Hasher

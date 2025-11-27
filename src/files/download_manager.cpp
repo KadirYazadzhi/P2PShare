@@ -1,13 +1,14 @@
 #include "files/download_manager.hpp"
 #include "crypto/hasher.hpp"
+#include "crypto/signature.hpp" // Added for Signature verification
 #include "common/serializer.hpp"
 #include <fstream>
 #include <iostream>
 #include <vector>
 #include <algorithm>
 #include <map>
-#include <sstream> // Added for stringstream
-#include <iomanip> // Added for iomanip
+#include <sstream>
+#include <iomanip>
 
 // Helper for serializing/deserializing manifest (should be in a common place)
 namespace Serializer {
@@ -15,19 +16,10 @@ namespace Serializer {
     Manifest deserialize_manifest(const std::vector<uint8_t>& buffer);
 }
 
-// Helper function to convert hash_t to hex string (copied from storage_manager.cpp)
-std::string hash_to_hex_dm(const hash_t& hash) {
-    std::stringstream ss;
-    for (uint8_t byte : hash) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
-    }
-    return ss.str();
-}
-
 DownloadManager::DownloadManager(hash_t root_hash, StorageManager& storage_manager)
     : state_(ManagerState::IDLE), root_hash_(root_hash), storage_manager_(storage_manager) { // Initialize storage_manager_ and root_hash_
     
-    std::string hex_hash_str = hash_to_hex_dm(root_hash_);
+    std::string hex_hash_str = Hasher::hash_to_hex(root_hash_);
     temp_file_path_ = fs::temp_directory_path() / (hex_hash_str + ".tmp");
     final_file_path_ = fs::current_path() / hex_hash_str; // Default final path
 
@@ -42,7 +34,7 @@ void DownloadManager::load_download_state() {
         // progress = std::get<1>(dm_state); // Currently, progress is just a piece_states_ count.
                                             // Need to enhance storage to save piece_states_ as BLOB.
                                             // For now, it will restart from scratch, but manifest is loaded.
-        std::cout << "Loaded download state for " << hash_to_hex_dm(root_hash_) << " from storage." << std::endl;
+        std::cout << "Loaded download state for " << Hasher::hash_to_hex(root_hash_) << " from storage." << std::endl;
         // Also load manifest if available
         manifest_ = storage_manager_.get_manifest(root_hash_);
         if (manifest_) {
@@ -155,6 +147,21 @@ void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr
     std::vector<uint8_t> manifest_data(msg.payload.begin() + 1, msg.payload.end());
     manifest_ = Serializer::deserialize_manifest(manifest_data);
     
+    // Verify Signature if present
+    if (!manifest_->signer_pubkey.empty() && !manifest_->signature.empty()) {
+        std::vector<uint8_t> root_hash_vec(manifest_->root_hash.begin(), manifest_->root_hash.end());
+        if (Signature::verify(root_hash_vec, manifest_->signature, manifest_->signer_pubkey)) {
+            std::cout << "Manifest Signature Verified! Trusted source." << std::endl;
+        } else {
+            std::cerr << "WARNING: Manifest Signature Verification FAILED!" << std::endl;
+            // Policy: fail download? Or just warn? For safety, let's warn but proceed for now (or fail).
+            // state_ = ManagerState::FAILED;
+            // return;
+        }
+    } else {
+        std::cout << "Manifest is unsigned." << std::endl;
+    }
+
     std::cout << "Received manifest for: " << manifest_->file_name << std::endl;
     final_file_path_ = manifest_->file_name;
 

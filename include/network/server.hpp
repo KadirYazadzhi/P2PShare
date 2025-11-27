@@ -28,6 +28,10 @@ public:
     // Access DHT
     dht::DhtNode& get_dht_node() { return dht_node_; }
 
+    // Bandwidth control
+    void set_global_upload_limit(size_t bytes_per_sec);
+    void set_global_download_limit(size_t bytes_per_sec);
+
 private:
     void start_accept();
     void handle_accept(std::shared_ptr<Connection> new_connection, const asio::error_code& error);
@@ -51,5 +55,8 @@ private:
     
     StorageManager& storage_manager_;
     dht::DhtNode dht_node_;
+    
+    std::shared_ptr<RateLimiter> global_upload_limiter_;
+    std::shared_ptr<RateLimiter> global_download_limiter_;
 };
 #endif //P2P_SERVER_HPP

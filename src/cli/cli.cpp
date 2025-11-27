@@ -1,35 +1,52 @@
 #include "cli/cli.hpp"
 #include "files/chunker.hpp"
+#include "crypto/signature.hpp"
+#include "crypto/hasher.hpp" // Added
 #include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
 #include <filesystem>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
-// Helper: Hex string to hash_t
-hash_t hex_to_hash_cli(const std::string& hex) {
-    hash_t h;
-    for (size_t i = 0; i < HASH_SIZE; ++i) {
-        h[i] = static_cast<uint8_t>(std::stoul(hex.substr(i * 2, 2), nullptr, 16));
-    }
-    return h;
-}
-
-// Helper: hash_t to Hex string
-std::string hash_to_hex_cli(const hash_t& h) {
-    std::stringstream ss;
-    for (uint8_t b : h) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
-    }
-    return ss.str();
-}
-
 CLI::CLI(StorageManager& sm, Server& server)
-    : storage_manager_(sm), server_(server), running_(false) {}
+    : storage_manager_(sm), server_(server), running_(false) {
+    load_or_generate_identity();
+}
 
 CLI::~CLI() {}
+
+void CLI::load_or_generate_identity() {
+    if (fs::exists("identity.pem") && fs::exists("identity.pub")) {
+        std::ifstream priv_file("identity.pem");
+        std::stringstream buffer;
+        buffer << priv_file.rdbuf();
+        private_key_pem_ = buffer.str();
+        
+        std::ifstream pub_file("identity.pub", std::ios::binary);
+        public_key_der_ = std::vector<uint8_t>((std::istreambuf_iterator<char>(pub_file)), std::istreambuf_iterator<char>());
+        std::cout << "Loaded identity." << std::endl;
+    } else {
+        std::cout << "Generating new identity (Keypair)..." << std::endl;
+        auto keypair = Signature::generate_keypair();
+        if (!keypair.first.empty()) {
+            private_key_pem_ = keypair.first;
+            public_key_der_ = keypair.second;
+            
+            std::ofstream priv_file("identity.pem");
+            priv_file << private_key_pem_;
+            
+            std::ofstream pub_file("identity.pub", std::ios::binary);
+            pub_file.write(reinterpret_cast<const char*>(public_key_der_.data()), public_key_der_.size());
+            
+            std::cout << "Identity generated and saved." << std::endl;
+        } else {
+            std::cerr << "Failed to generate identity!" << std::endl;
+        }
+    }
+}
 
 void CLI::run() {
     running_ = true;
@@ -53,6 +70,7 @@ void CLI::print_help() {
               << "  dht_peers             - List known DHT peers (from storage)\n"
               << "  dht_put <key> <val>   - Store value in DHT\n"
               << "  dht_get <key>         - Find value in DHT\n"
+              << "  limit <up|down> <rate>  - Set global limit (e.g., 100KB, 5MB)\n"
               << "  help                    - Show this help\n"
               << "  quit / exit             - Exit\n"
               << std::endl;
@@ -76,9 +94,63 @@ void CLI::handle_command(const std::string& line) {
     else if (cmd == "dht_peers") cmd_dht_peers(args);
     else if (cmd == "dht_put") cmd_dht_put(args);
     else if (cmd == "dht_get") cmd_dht_get(args);
+    else if (cmd == "limit") cmd_limit(args);
     else if (cmd == "help") print_help();
     else if (cmd == "quit" || cmd == "exit") running_ = false;
     else std::cout << "Unknown command: " << cmd << std::endl;
+}
+
+// Helper for parsing size strings
+size_t parse_size(std::string s) {
+    size_t multiplier = 1;
+    if (s.size() > 2) {
+        std::string suffix = s.substr(s.size() - 2);
+        std::transform(suffix.begin(), suffix.end(), suffix.begin(), ::toupper);
+        
+        if (suffix == "KB") {
+            multiplier = 1024;
+            s = s.substr(0, s.size() - 2);
+        } else if (suffix == "MB") {
+            multiplier = 1024 * 1024;
+            s = s.substr(0, s.size() - 2);
+        }
+    }
+    else if (s.size() > 1) {
+        char suffix = toupper(s.back());
+         if (suffix == 'K') {
+            multiplier = 1024;
+            s.pop_back();
+        } else if (suffix == 'M') {
+            multiplier = 1024 * 1024;
+            s.pop_back();
+        }
+    }
+    
+    return std::stoull(s) * multiplier;
+}
+
+void CLI::cmd_limit(const std::vector<std::string>& args) {
+    if (args.size() < 2) {
+        std::cout << "Usage: limit <up|down> <rate> (e.g., 500KB)" << std::endl;
+        return;
+    }
+    std::string type = args[0];
+    std::string rate_str = args[1];
+    
+    try {
+        size_t rate = parse_size(rate_str);
+        if (type == "up") {
+            server_.set_global_upload_limit(rate);
+            std::cout << "Global upload limit set to " << rate << " bytes/sec." << std::endl;
+        } else if (type == "down") {
+            server_.set_global_download_limit(rate);
+             std::cout << "Global download limit set to " << rate << " bytes/sec." << std::endl;
+        } else {
+            std::cout << "Invalid type. Use 'up' or 'down'." << std::endl;
+        }
+    } catch (...) {
+        std::cout << "Invalid rate format." << std::endl;
+    }
 }
 
 void CLI::cmd_share(const std::vector<std::string>& args) {
@@ -94,12 +166,21 @@ void CLI::cmd_share(const std::vector<std::string>& args) {
     
     try {
         // Default piece size 256KB
-        Manifest m = Chunker::create_manifest_from_file(path, 256 * 1024); 
+        Manifest m = Chunker::create_manifest_from_file(path, 256 * 1024);
+        
+        // Sign the manifest
+        if (!private_key_pem_.empty()) {
+            std::vector<uint8_t> data_to_sign(m.root_hash.begin(), m.root_hash.end());
+            m.signature = Signature::sign(data_to_sign, private_key_pem_);
+            m.signer_pubkey = public_key_der_;
+            std::cout << "Manifest signed." << std::endl;
+        }
+        
         storage_manager_.save_manifest(m);
         FileSharer::instance().add_share(m, path);
         
         std::cout << "File shared successfully!\n"
-                  << "Root Hash (ID): " << hash_to_hex_cli(m.root_hash) << "\n"
+                  << "Root Hash (ID): " << Hasher::hash_to_hex(m.root_hash) << "\n"
                   << "Size: " << m.file_size << " bytes\n"
                   << "Pieces: " << m.pieces_count << std::endl;
 
@@ -140,7 +221,7 @@ void CLI::cmd_download(const std::vector<std::string>& args) {
     }
     
     try {
-        hash_t root_hash = hex_to_hash_cli(hex);
+        hash_t root_hash = Hasher::hex_to_hash(hex);
         server_.start_download(root_hash);
         std::cout << "Download started for " << hex << std::endl;
         
@@ -196,7 +277,7 @@ void CLI::cmd_status(const std::vector<std::string>& args) {
     auto manifests = storage_manager_.get_all_manifests();
     std::cout << "Shared Files: " << manifests.size() << std::endl;
     for (auto& m : manifests) {
-        std::cout << " - " << m.file_name << " (" << hash_to_hex_cli(m.root_hash) << ")" << std::endl;
+        std::cout << " - " << m.file_name << " (" << Hasher::hash_to_hex(m.root_hash) << ")" << std::endl;
     }
 }
 
@@ -217,7 +298,7 @@ void CLI::cmd_dht_peers(const std::vector<std::string>& args) {
     auto peers = storage_manager_.get_peers();
     std::cout << "Known DHT Peers: " << peers.size() << std::endl;
     for (const auto& p : peers) {
-        std::cout << " - ID: " << hash_to_hex_cli(p.id) << " Endpoint: " << p.endpoint << std::endl;
+        std::cout << " - ID: " << Hasher::hash_to_hex(p.id) << " Endpoint: " << p.endpoint << std::endl;
     }
 }
 
@@ -226,7 +307,7 @@ void CLI::cmd_dht_put(const std::vector<std::string>& args) {
         std::cout << "Usage: dht_put <key_hex> <value>" << std::endl;
         return;
     }
-    dht::NodeID key = hex_to_hash_cli(args[0]);
+    dht::NodeID key = Hasher::hex_to_hash(args[0]);
     std::string val = args[1];
     std::vector<uint8_t> val_bytes(val.begin(), val.end());
     
@@ -244,7 +325,7 @@ void CLI::cmd_dht_get(const std::vector<std::string>& args) {
          std::cout << "Usage: dht_get <key_hex>" << std::endl;
          return;
     }
-    dht::NodeID key = hex_to_hash_cli(args[0]);
+    dht::NodeID key = Hasher::hex_to_hash(args[0]);
     server_.get_dht_node().start_find_value_lookup(key, [](const std::optional<std::vector<uint8_t>>& val, const std::vector<dht::NodeInfo>& nodes) {
         if (val) {
             std::string s(val->begin(), val->end());

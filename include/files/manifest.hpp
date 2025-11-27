@@ -20,6 +20,9 @@ struct Manifest {
     uint32_t pieces_count;
     std::vector<hash_t> piece_hashes;
     hash_t root_hash; // Merkle root or hash of concatenated piece hashes
+    
+    std::vector<uint8_t> signer_pubkey;
+    std::vector<uint8_t> signature;
 
     // Helper function to print the manifest details
     void print() const {

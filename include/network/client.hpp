@@ -21,15 +21,18 @@ public:
 
     Client(asio::io_context& io_context, message_handler_t handler, asio::ssl::context& ssl_context)
         : io_context_(io_context), message_handler_(handler), ssl_context_(ssl_context),
-          peer_id_(dht::generate_random_id()), // Generate a random peer ID
-          pubkey_() { // Initialize pubkey (will be filled with actual key later)
-        // For now, fill pubkey with dummy data
+          peer_id_(dht::generate_random_id()),
+          pubkey_(),
+          upload_limiter_(std::make_shared<RateLimiter>(1024 * 1024 * 10)), // 10 MB/s default
+          download_limiter_(std::make_shared<RateLimiter>(1024 * 1024 * 10)) {
         for(size_t i = 0; i < PUBKEY_SIZE; ++i) {
             pubkey_[i] = static_cast<uint8_t>(std::rand() % 256);
         }
     }
 
 private:
+    std::shared_ptr<RateLimiter> upload_limiter_;
+    std::shared_ptr<RateLimiter> download_limiter_;
 
     void send_handshake(std::shared_ptr<Connection> connection) {
         HandshakePayload hs_payload;
@@ -49,7 +52,7 @@ private:
 
 public:
     void connect(const std::string& host, uint16_t port, on_connect_handler_t on_connect) {
-        auto conn = std::make_shared<Connection>(io_context_, ssl_context_); // Pass ssl_context_
+        auto conn = std::make_shared<Connection>(io_context_, ssl_context_, upload_limiter_, download_limiter_); 
         
         conn->set_message_handler([this, conn_weak = std::weak_ptr<Connection>(conn)](const Message& msg) {
             if (auto conn_shared = conn_weak.lock()) {

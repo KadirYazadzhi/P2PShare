@@ -1,23 +1,12 @@
 #include "storage/share_state.hpp"
 #include "nlohmann/json.hpp"
+#include "crypto/hasher.hpp" // Added
 #include <fstream>
 #include <iostream>
-#include <filesystem> // <--- Added this include
+#include <filesystem>
 
-namespace fs = std::filesystem; // <--- Added this using directive
+namespace fs = std::filesystem;
 using json = nlohmann::json;
-
-// Helper to convert binary hash to hex string
-namespace {
-    std::string hash_to_hex(const hash_t& hash) {
-        std::stringstream ss;
-        ss << std::hex << std::setfill('0');
-        for (const auto& byte : hash) {
-            ss << std::setw(2) << static_cast<int>(byte);
-        }
-        return ss.str();
-    }
-}
 
 // JSON serialization for Manifest
 void to_json(json& j, const Manifest& m) {
@@ -25,10 +14,10 @@ void to_json(json& j, const Manifest& m) {
         {"file_name", m.file_name},
         {"file_size", m.file_size},
         {"piece_size", m.piece_size},
-        {"root_hash", hash_to_hex(m.root_hash)}
+        {"root_hash", Hasher::hash_to_hex(m.root_hash)}
     };
     for(const auto& piece_hash : m.piece_hashes) {
-        j["piece_hashes"].push_back(hash_to_hex(piece_hash));
+        j["piece_hashes"].push_back(Hasher::hash_to_hex(piece_hash));
     }
 }
 
@@ -36,9 +25,9 @@ void from_json(const json& j, Manifest& m) {
     j.at("file_name").get_to(m.file_name);
     j.at("file_size").get_to(m.file_size);
     j.at("piece_size").get_to(m.piece_size);
-    m.root_hash = hex_to_hash(j.at("root_hash").get<std::string>());
+    m.root_hash = Hasher::hex_to_hash(j.at("root_hash").get<std::string>());
     for(const auto& hex_hash : j.at("piece_hashes")) {
-        m.piece_hashes.push_back(hex_to_hash(hex_hash.get<std::string>()));
+        m.piece_hashes.push_back(Hasher::hex_to_hash(hex_hash.get<std::string>()));
     }
     m.pieces_count = m.piece_hashes.size();
 }
@@ -65,7 +54,7 @@ void ShareState::add_share(const Manifest& manifest, const std::filesystem::path
     }
 
     // Add new share
-    std::string root_hash_hex = hash_to_hex(manifest.root_hash);
+    std::string root_hash_hex = Hasher::hash_to_hex(manifest.root_hash);
     state_json[root_hash_hex]["manifest"] = manifest;
     state_json[root_hash_hex]["path"] = absolute_file_path.string();
 

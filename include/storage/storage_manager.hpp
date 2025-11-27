@@ -39,6 +39,7 @@ public:
     // More complex download state will be added later
     bool save_download_state(const hash_t& root_hash, const std::string& file_path, uint32_t progress);
     std::tuple<std::string, uint32_t> get_download_state(const hash_t& root_hash); // file_path, progress
+    std::vector<std::pair<hash_t, std::string>> get_all_downloads();
     bool delete_download_state(const hash_t& root_hash);
 
 private:

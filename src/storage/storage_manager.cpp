@@ -1,4 +1,5 @@
 #include "storage/storage_manager.hpp"
+#include "crypto/hasher.hpp" // Added
 #include <iostream>
 #include <sstream>
 #include <iomanip> // For std::hex, std::setw, std::setfill
@@ -6,36 +7,43 @@
 #include <optional>
 
 // Helper function to convert NodeID to hex string
+
 std::string node_id_to_hex(const dht::NodeID& id) {
+
     std::stringstream ss;
+
     for (uint8_t byte : id) {
+
         ss << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
+
     }
+
     return ss.str();
+
 }
+
+
 
 // Helper function to convert hex string to NodeID
+
 dht::NodeID hex_to_node_id(const std::string& hex_str) {
+
     dht::NodeID id;
+
     for (size_t i = 0; i < dht::NODE_ID_SIZE; ++i) {
+
         id[i] = static_cast<uint8_t>(std::stoul(hex_str.substr(i * 2, 2), nullptr, 16));
+
     }
+
     return id;
-}
 
-// Helper function to convert hash_t to hex string
-std::string hash_to_hex(const hash_t& hash) {
-    std::stringstream ss;
-    for (uint8_t byte : hash) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)byte;
-    }
-    return ss.str();
 }
-
 
 
 
 StorageManager::StorageManager(const std::string& db_path)
+
     : db_path_(db_path), db_(nullptr) {
     // Open the database immediately
     if (!open()) {
@@ -202,7 +210,7 @@ bool StorageManager::save_manifest(const Manifest& manifest) {
         return false;
     }
 
-    std::string root_hash_hex = hash_to_hex(manifest.root_hash);
+    std::string root_hash_hex = Hasher::hash_to_hex(manifest.root_hash);
     sqlite3_bind_text(stmt, 1, root_hash_hex.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, manifest.file_name.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt, 3, manifest.file_size);
@@ -236,12 +244,12 @@ std::optional<Manifest> StorageManager::get_manifest(const hash_t& root_hash) {
         return std::nullopt;
     }
 
-    std::string root_hash_hex = hash_to_hex(root_hash);
+    std::string root_hash_hex = Hasher::hash_to_hex(root_hash);
     sqlite3_bind_text(stmt, 1, root_hash_hex.c_str(), -1, SQLITE_STATIC);
 
     if ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         Manifest manifest;
-        manifest.root_hash = hex_to_hash(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+        manifest.root_hash = Hasher::hex_to_hash(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
         manifest.file_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         manifest.file_size = sqlite3_column_int64(stmt, 2);
         manifest.piece_size = sqlite3_column_int(stmt, 3);
@@ -276,7 +284,7 @@ std::vector<Manifest> StorageManager::get_all_manifests() {
 
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         Manifest manifest;
-        manifest.root_hash = hex_to_hash(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+        manifest.root_hash = Hasher::hex_to_hash(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
         manifest.file_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         manifest.file_size = sqlite3_column_int64(stmt, 2);
         manifest.piece_size = sqlite3_column_int(stmt, 3);
@@ -308,7 +316,7 @@ bool StorageManager::delete_manifest(const hash_t& root_hash) {
         return false;
     }
 
-    std::string root_hash_hex = hash_to_hex(root_hash);
+    std::string root_hash_hex = Hasher::hash_to_hex(root_hash);
     sqlite3_bind_text(stmt, 1, root_hash_hex.c_str(), -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);
@@ -331,7 +339,7 @@ bool StorageManager::save_download_state(const hash_t& root_hash, const std::str
         return false;
     }
 
-    std::string root_hash_hex = hash_to_hex(root_hash);
+    std::string root_hash_hex = Hasher::hash_to_hex(root_hash);
     sqlite3_bind_text(stmt, 1, root_hash_hex.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, file_path.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 3, progress);
@@ -356,7 +364,7 @@ std::tuple<std::string, uint32_t> StorageManager::get_download_state(const hash_
         return {"", 0};
     }
 
-    std::string root_hash_hex = hash_to_hex(root_hash);
+    std::string root_hash_hex = Hasher::hash_to_hex(root_hash);
     sqlite3_bind_text(stmt, 1, root_hash_hex.c_str(), -1, SQLITE_STATIC);
 
     if ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
@@ -371,6 +379,26 @@ std::tuple<std::string, uint32_t> StorageManager::get_download_state(const hash_
     return {"", 0};
 }
 
+std::vector<std::pair<hash_t, std::string>> StorageManager::get_all_downloads() {
+    std::vector<std::pair<hash_t, std::string>> downloads;
+    std::string sql = "SELECT root_hash, file_path FROM downloads WHERE status = 'active';";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db_) << std::endl;
+        return downloads;
+    }
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        std::string hash_hex = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        std::string file_path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        
+        downloads.push_back({Hasher::hex_to_hash(hash_hex), file_path});
+    }
+    sqlite3_finalize(stmt);
+    return downloads;
+}
+
 bool StorageManager::delete_download_state(const hash_t& root_hash) {
     std::string sql = "DELETE FROM downloads WHERE root_hash = ?;";
     sqlite3_stmt* stmt;
@@ -380,7 +408,7 @@ bool StorageManager::delete_download_state(const hash_t& root_hash) {
         return false;
     }
 
-    std::string root_hash_hex = hash_to_hex(root_hash);
+    std::string root_hash_hex = Hasher::hash_to_hex(root_hash);
     sqlite3_bind_text(stmt, 1, root_hash_hex.c_str(), -1, SQLITE_STATIC);
 
     rc = sqlite3_step(stmt);

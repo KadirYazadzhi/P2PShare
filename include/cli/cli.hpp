@@ -35,9 +35,17 @@ private:
     void cmd_dht_put(const std::vector<std::string>& args);
     void cmd_dht_get(const std::vector<std::string>& args);
 
+    // Bandwidth
+    void cmd_limit(const std::vector<std::string>& args);
+
+    void load_or_generate_identity();
+
     StorageManager& storage_manager_;
     Server& server_;
     bool running_;
+    
+    std::string private_key_pem_;
+    std::vector<uint8_t> public_key_der_;
     
     // Keep track of active downloads
     // key: root_hash (as hex string for simplicity in map, or hash_t)

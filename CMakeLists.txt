@@ -19,6 +19,7 @@ set(SOURCES
     src/common/serializer.cpp
     src/common/rate_limiter.cpp
     src/crypto/hasher.cpp
+    src/crypto/signature.cpp
     src/files/chunker.cpp
     src/files/download_manager.cpp
     src/files/file_sharer.cpp

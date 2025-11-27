@@ -13,7 +13,9 @@ Server::Server(asio::io_context& io_context, uint16_t port, StorageManager& stor
       peer_id_(dht::generate_random_id()),
       pubkey_(),
       storage_manager_(storage_manager),
-      dht_node_(io_context, port, storage_manager) { // Initialize DHT node on same port (UDP)
+      dht_node_(io_context, port, storage_manager),
+      global_upload_limiter_(std::make_shared<RateLimiter>(10 * 1024 * 1024)), // 10MB/s default
+      global_download_limiter_(std::make_shared<RateLimiter>(10 * 1024 * 1024)) {
 
     for(size_t i = 0; i < PUBKEY_SIZE; ++i) {
         pubkey_[i] = static_cast<uint8_t>(std::rand() % 256);
@@ -21,8 +23,23 @@ Server::Server(asio::io_context& io_context, uint16_t port, StorageManager& stor
     init_ssl_context();
     std::cout << "Server listening on TCP port " << port << " and UDP port " << port << " (DHT)" << std::endl;
     
+    // Resume active downloads
+    auto pending_downloads = storage_manager_.get_all_downloads();
+    std::cout << "Resuming " << pending_downloads.size() << " active downloads..." << std::endl;
+    for (const auto& [root_hash, path] : pending_downloads) {
+        start_download(root_hash);
+    }
+
     dht_node_.start(); // Start DHT
     start_accept();
+}
+
+void Server::set_global_upload_limit(size_t bytes_per_sec) {
+    if (global_upload_limiter_) global_upload_limiter_->set_max_rate(bytes_per_sec);
+}
+
+void Server::set_global_download_limit(size_t bytes_per_sec) {
+    if (global_download_limiter_) global_download_limiter_->set_max_rate(bytes_per_sec);
 }
 
 void Server::init_ssl_context() {
@@ -38,7 +55,7 @@ void Server::init_ssl_context() {
 }
 
 void Server::start_accept() {
-    auto new_connection = std::make_shared<Connection>(io_context_, ssl_context_);
+    auto new_connection = std::make_shared<Connection>(io_context_, ssl_context_, global_upload_limiter_, global_download_limiter_);
 
     new_connection->set_message_handler([this, conn_weak = std::weak_ptr<Connection>(new_connection)](Message msg) {
         if (auto conn_shared = conn_weak.lock()) {
@@ -66,7 +83,7 @@ void Server::start_accept() {
 }
 
 void Server::connect(const std::string& host, uint16_t port) {
-    auto new_connection = std::make_shared<Connection>(io_context_, ssl_context_);
+    auto new_connection = std::make_shared<Connection>(io_context_, ssl_context_, global_upload_limiter_, global_download_limiter_);
 
     new_connection->set_message_handler([this, conn_weak = std::weak_ptr<Connection>(new_connection)](Message msg) {
         if (auto conn_shared = conn_weak.lock()) {

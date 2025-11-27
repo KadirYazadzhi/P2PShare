@@ -29,6 +29,15 @@ std::vector<uint8_t> serialize_manifest(const Manifest& m) {
     for(const auto& h : m.piece_hashes) {
         buffer.insert(buffer.end(), h.begin(), h.end());
     }
+    // signer_pubkey
+    uint32_t pk_len = m.signer_pubkey.size();
+    buffer.insert(buffer.end(), (uint8_t*)&pk_len, (uint8_t*)&pk_len + sizeof(uint32_t));
+    buffer.insert(buffer.end(), m.signer_pubkey.begin(), m.signer_pubkey.end());
+    // signature
+    uint32_t sig_len = m.signature.size();
+    buffer.insert(buffer.end(), (uint8_t*)&sig_len, (uint8_t*)&sig_len + sizeof(uint32_t));
+    buffer.insert(buffer.end(), m.signature.begin(), m.signature.end());
+
     return buffer;
 }
 
@@ -58,6 +67,26 @@ Manifest deserialize_manifest(const std::vector<uint8_t>& buffer) {
     for(uint32_t i = 0; i < m.pieces_count; ++i) {
         std::memcpy(m.piece_hashes[i].data(), buffer.data() + offset, HASH_SIZE);
         offset += HASH_SIZE;
+    }
+    // signer_pubkey
+    if (offset < buffer.size()) {
+        uint32_t pk_len;
+        std::memcpy(&pk_len, buffer.data() + offset, sizeof(uint32_t));
+        offset += sizeof(uint32_t);
+        if (offset + pk_len <= buffer.size()) {
+            m.signer_pubkey.assign(buffer.begin() + offset, buffer.begin() + offset + pk_len);
+            offset += pk_len;
+        }
+    }
+    // signature
+    if (offset < buffer.size()) {
+        uint32_t sig_len;
+        std::memcpy(&sig_len, buffer.data() + offset, sizeof(uint32_t));
+        offset += sizeof(uint32_t);
+        if (offset + sig_len <= buffer.size()) {
+            m.signature.assign(buffer.begin() + offset, buffer.begin() + offset + sig_len);
+            offset += sig_len;
+        }
     }
     return m;
 }
