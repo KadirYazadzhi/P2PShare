@@ -4,6 +4,18 @@ project(P2PShare CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Security and Warning Flags
+if(UNIX)
+    add_compile_options(
+        -Wall 
+        -Wextra 
+        -Wpedantic 
+        -fstack-protector-strong 
+        -D_FORTIFY_SOURCE=2 
+        -O2
+    )
+endif()
+
 # Find OpenSSL for hashing
 find_package(OpenSSL REQUIRED)
 

@@ -10,11 +10,25 @@
 #include <map>
 #include <sstream>
 #include <iomanip>
+#include <tuple> // Added for std::tuple structured binding
 
 // Helper for serializing/deserializing manifest
 namespace Serializer {
     std::vector<uint8_t> serialize_manifest(const Manifest& m);
     Manifest deserialize_manifest(const std::vector<uint8_t>& buffer);
+    std::tuple<hash_t, Bitfield> deserialize_bitfield_payload(const std::vector<uint8_t>& buffer); // Added declaration
+}
+
+// Helper to safely get endpoint string
+static std::string get_peer_endpoint_str(std::shared_ptr<Connection> peer) {
+    try {
+        if (peer->socket().is_open()) {
+            std::stringstream ss;
+            ss << peer->socket().remote_endpoint();
+            return ss.str();
+        }
+    } catch (...) {}
+    return "Unknown/Disconnected";
 }
 
 DownloadManager::DownloadManager(hash_t root_hash, StorageManager& storage_manager)
@@ -57,7 +71,7 @@ void DownloadManager::save_download_state() {
 
 void DownloadManager::add_peer(std::shared_ptr<Connection> peer_conn) {
     peers_.insert(peer_conn);
-    LOG_INFO("Peer ", peer_conn->socket().remote_endpoint(), " added to download.");
+    LOG_INFO("Peer ", get_peer_endpoint_str(peer_conn), " added to download.");
     
     if (manifest_ && state_ == ManagerState::DOWNLOADING) {
         QuerySearchPayload payload;
@@ -130,7 +144,7 @@ void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr
 
     bool found = msg.payload[0];
     if (!found) {
-        LOG_WARN("File not found on peer ", peer_conn->socket().remote_endpoint());
+        LOG_WARN("File not found on peer ", get_peer_endpoint_str(peer_conn));
         state_ = ManagerState::FAILED;
         return;
     }
@@ -164,23 +178,27 @@ void DownloadManager::handle_search_response(const Message& msg, std::shared_ptr
 void DownloadManager::handle_bitfield_response(const Message& msg, std::shared_ptr<Connection> peer_conn) {
     if (!manifest_) return;
 
-    hash_t root_hash;
-    std::memcpy(root_hash.data(), msg.payload.data(), HASH_SIZE);
-    if (root_hash != root_hash_) return;
+    try {
+        auto [root_hash, bf] = Serializer::deserialize_bitfield_payload(msg.payload);
 
-    std::vector<uint8_t> field_bytes(msg.payload.begin() + HASH_SIZE, msg.payload.end());
-    Bitfield bf(manifest_->pieces_count, field_bytes);
-    peer_conn->set_peer_bitfield(root_hash, bf);
+        if (root_hash != root_hash_) return;
 
-    LOG_INFO("Received bitfield from peer ", peer_conn->socket().remote_endpoint());
+        peer_conn->set_peer_bitfield(root_hash, bf);
 
-    for (uint32_t i = 0; i < manifest_->pieces_count; ++i) {
-        if (bf.has_piece(i)) {
-            piece_availability_[i]++;
+        LOG_INFO("Received bitfield from peer ", get_peer_endpoint_str(peer_conn));
+
+        for (uint32_t i = 0; i < manifest_->pieces_count; ++i) {
+            if (bf.has_piece(i)) {
+                if (i < piece_availability_.size()) {
+                    piece_availability_[i]++;
+                }
+            }
         }
-    }
 
-    schedule_work();
+        schedule_work();
+    } catch (const std::exception& e) {
+        LOG_ERR("Error deserializing bitfield from peer ", get_peer_endpoint_str(peer_conn), ": ", e.what());
+    }
 }
 
 void DownloadManager::handle_have_response(const Message& msg, std::shared_ptr<Connection> peer_conn) {
@@ -201,7 +219,7 @@ void DownloadManager::handle_have_response(const Message& msg, std::shared_ptr<C
 
             if (payload.piece_index < piece_availability_.size()) {
                 piece_availability_[payload.piece_index]++;
-                LOG_DEBUG("Peer ", peer_conn->socket().remote_endpoint(), 
+                LOG_DEBUG("Peer ", get_peer_endpoint_str(peer_conn), 
                           " now has piece ", payload.piece_index, ". Rarity: ", 
                           piece_availability_[payload.piece_index]);
             }
@@ -293,7 +311,7 @@ void DownloadManager::request_piece_from_peer(uint32_t piece_index, std::shared_
     msg.payload.resize(sizeof(payload));
     std::memcpy(msg.payload.data(), &payload, sizeof(payload));
 
-    LOG_DEBUG("Requesting piece ", piece_index, " from ", peer_conn->socket().remote_endpoint());
+    LOG_DEBUG("Requesting piece ", piece_index, " from ", get_peer_endpoint_str(peer_conn));
     peer_conn->send_message(msg);
 }
 
@@ -325,7 +343,7 @@ void DownloadManager::handle_piece_response(const Message& msg, std::shared_ptr<
         }
         schedule_work();
     } else {
-        LOG_ERR("Piece ", piece_index, " failed verification from peer ", peer_conn->socket().remote_endpoint());
+        LOG_ERR("Piece ", piece_index, " failed verification from peer ", get_peer_endpoint_str(peer_conn));
         piece_states_[piece_index] = PieceState::Needed; 
         
         // --- STRIKE SYSTEM ---
@@ -377,7 +395,7 @@ void DownloadManager::finalize_download() {
 }
 
 void DownloadManager::ban_peer(std::shared_ptr<Connection> peer_conn) {
-    LOG_WARN("Banning peer ", peer_conn->socket().remote_endpoint(), " due to repeated bad pieces.");
+    LOG_WARN("Banning peer ", get_peer_endpoint_str(peer_conn), " due to repeated bad pieces.");
     peers_.erase(peer_conn);
     in_flight_requests_.erase(peer_conn);
     peer_strikes_.erase(peer_conn);

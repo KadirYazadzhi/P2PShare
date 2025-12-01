@@ -1,23 +1,36 @@
 #include "crypto/hasher.hpp"
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <stdexcept>
 #include <sstream>
 #include <iomanip>
+#include <memory>
 
 namespace Hasher {
 
+// Helper deleter
+struct EVP_MD_CTX_Deleter { void operator()(EVP_MD_CTX* c) { EVP_MD_CTX_free(c); } };
+
 hash_t sha256(const std::vector<uint8_t>& data) {
     hash_t hash;
-    SHA256_CTX sha256;
-    if (!SHA256_Init(&sha256)) {
-        throw std::runtime_error("SHA256_Init failed");
+    std::unique_ptr<EVP_MD_CTX, EVP_MD_CTX_Deleter> ctx(EVP_MD_CTX_new());
+    
+    if (!ctx) {
+        throw std::runtime_error("EVP_MD_CTX_new failed");
     }
-    if (!SHA256_Update(&sha256, data.data(), data.size())) {
-        throw std::runtime_error("SHA256_Update failed");
+
+    if (!EVP_DigestInit_ex(ctx.get(), EVP_sha256(), NULL)) {
+        throw std::runtime_error("EVP_DigestInit_ex failed");
     }
-    if (!SHA256_Final(hash.data(), &sha256)) {
-        throw std::runtime_error("SHA256_Final failed");
+
+    if (!EVP_DigestUpdate(ctx.get(), data.data(), data.size())) {
+        throw std::runtime_error("EVP_DigestUpdate failed");
     }
+
+    unsigned int len = 0;
+    if (!EVP_DigestFinal_ex(ctx.get(), hash.data(), &len)) {
+        throw std::runtime_error("EVP_DigestFinal_ex failed");
+    }
+    
     return hash;
 }
 

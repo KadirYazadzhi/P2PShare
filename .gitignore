@@ -40,3 +40,10 @@ cmake_install.cmake
 # Optional: manifest/pieces cache (if you store chunks locally)
 data/downloads/
 data/shared/*/pieces/
+
+# Security
+server.key
+server.crt
+
+# Test environment artifacts
+test_env/build/

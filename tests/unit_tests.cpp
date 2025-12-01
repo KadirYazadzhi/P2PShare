@@ -34,7 +34,7 @@ TEST(HasherTest, Sha256Vector) {
 // Test Hasher::sha256(const std::string&)
 TEST(HasherTest, Sha256String) {
     std::string data = "Hello, World!";
-    hash_t expected_hash = Hasher::hex_to_hash("d04b98f48e8f8bcc15ae5b7ac0d655f4874f2a6cefe4e664df0d8cb3b8fd91d1");
+    hash_t expected_hash = Hasher::hex_to_hash("dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f");
     ASSERT_EQ(Hasher::sha256(data), expected_hash);
 }
 
@@ -393,9 +393,11 @@ TEST_F(DownloadManagerTest, FullDownload) {
     Message search_resp_msg;
     search_resp_msg.type = MessageType::SEARCH_RESPONSE;
     search_resp_msg.payload.push_back(1); // Found = true
+    
+    std::vector<uint8_t> serialized_manifest = Serializer::serialize_manifest(test_manifest);
     search_resp_msg.payload.insert(search_resp_msg.payload.end(),
-                                   Serializer::serialize_manifest(test_manifest).begin(),
-                                   Serializer::serialize_manifest(test_manifest).end());
+                                   serialized_manifest.begin(),
+                                   serialized_manifest.end());
     dm.handle_message(search_resp_msg, peer);
 
     // Simulate BITFIELD

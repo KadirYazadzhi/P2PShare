@@ -53,7 +53,10 @@ void Server::init_ssl_context() {
     try {
         ssl_context_.set_options(
             asio::ssl::context::default_workarounds
-            | asio::ssl::context::no_sslv2);
+            | asio::ssl::context::no_sslv2
+            | asio::ssl::context::no_sslv3
+            | asio::ssl::context::no_tlsv1
+            | asio::ssl::context::no_tlsv1_1);
         ssl_context_.use_certificate_chain_file("server.crt");
         ssl_context_.use_private_key_file("server.key", asio::ssl::context::file_format::pem);
     } catch (const asio::system_error& e) {
